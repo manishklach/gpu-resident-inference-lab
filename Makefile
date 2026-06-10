@@ -13,7 +13,7 @@
 #   make cuda-bench-large - Larger CUDA measurement run
 #   make clean        - Remove build artifacts
 
-.PHONY: install test lint format bench demo cuda-stub cuda-smoke cuda-bench cuda-bench-large clean help
+.PHONY: install test lint format bench demo compare cuda-stub cuda-smoke cuda-bench cuda-bench-large clean help
 
 # Default target
 help:
@@ -24,9 +24,10 @@ help:
 	@echo "  format      - Auto-fix with ruff and black"
 	@echo "  bench       - Run benchmark harness"
 	@echo "  demo        - Run demo script"
+	@echo "  compare     - Run Python bench + CUDA sweep and compare side-by-side"
 	@echo "  cuda-smoke  - Build and run CUDA staging smoke tests (requires nvcc)"
-	@echo "  cuda-bench  - Build and run CUDA measurement harness (requires nvcc)"
-	@echo "  cuda-bench-large - Larger CUDA measurement run (requires nvcc)"
+	@echo "  cuda-bench  - Build and run CUDA measurement sweep (requires nvcc)"
+	@echo "  cuda-bench-large - Larger CUDA measurement sweep (requires nvcc)"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  help        - Show this help"
 
@@ -50,6 +51,36 @@ bench:
 
 demo:
 	python -m megakernel_lab.demo
+
+compare:
+	@echo "Running Python CPU bench and CUDA measurement comparison..."
+	@mkdir -p results
+	@echo ""
+	@echo "=== Python CPU Simulator ==="
+	@python -c "from megakernel_lab.bench import BenchmarkRunner; BenchmarkRunner(batch_sizes=[1,2,4,8], block_sizes=[1,2,4]).run()" && \
+	 echo "" && \
+	 PY_CSV=$$(ls -t results/bench_*.csv 2>/dev/null | head -1) && \
+	 if [ -z "$$PY_CSV" ]; then \
+	   echo "Error: Python bench did not produce a CSV"; \
+	   exit 1; \
+	 fi && \
+	 echo "Python CSV: $$PY_CSV" && \
+	 if command -v nvcc >/dev/null 2>&1; then \
+	   echo "" && \
+	   echo "=== CUDA Measurement ===" && \
+	   cmake -S cuda -B build/cuda && \
+	   cmake --build build/cuda && \
+	   ./build/cuda/xlpk_cuda_smoke --mode sweep --csv results/cuda_compare_$$(date +%Y%m%d_%H%M%S).csv && \
+	   CU_CSV=$$(ls -t results/cuda_compare_*.csv 2>/dev/null | head -1) && \
+	   echo "" && \
+	   echo "=== Side-by-Side Comparison ===" && \
+	   python scripts/compare_metrics.py "$$PY_CSV" "$$CU_CSV"; \
+	 else \
+	   echo "" && \
+	   echo "=== Python-Only (CUDA not available) ===" && \
+	   echo "Python CSV: $$PY_CSV"; \
+	   echo "Install the CUDA toolkit to include CUDA measurements."; \
+	 fi
 
 cuda-stub:
 	@echo "The legacy persistent_decode_stub has been replaced by the mega-kernel smoke test."
@@ -77,14 +108,17 @@ cuda-smoke:
 	fi
 
 cuda-bench:
-	@echo "Building and running CUDA measurement harness..."
+	@echo "Building and running CUDA measurement harness (sweep)..."
 	@if command -v nvcc >/dev/null 2>&1; then \
 		cmake -S cuda -B build/cuda && \
 		cmake --build build/cuda && \
+		mkdir -p results && \
 		echo "" && \
-		echo "=== Running CUDA measurement harness ===" && \
-		mkdir -p build/cuda && \
-		./build/cuda/xlpk_cuda_smoke --mode both --requests 8 --tokens 128 --draft-len 4 --csv build/cuda/cuda_results.csv; \
+		echo "=== Sweep: requests [2,4,8,16] x tokens [32,64,128] x draft_len [1,4,8] ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode sweep --csv results/bench_$$(date +%Y%m%d_%H%M%S).csv && \
+		echo "" && \
+		echo "=== Summary ===" && \
+		python scripts/summarize_cuda_results.py results/bench_*.csv; \
 	else \
 		echo "nvcc not found - skipping CUDA measurement harness."; \
 		echo "Install the CUDA toolkit (https://developer.nvidia.com/cuda-downloads)"; \
@@ -92,14 +126,17 @@ cuda-bench:
 	fi
 
 cuda-bench-large:
-	@echo "Building and running large CUDA measurement harness..."
+	@echo "Building and running large CUDA measurement harness (sweep)..."
 	@if command -v nvcc >/dev/null 2>&1; then \
 		cmake -S cuda -B build/cuda && \
 		cmake --build build/cuda && \
+		mkdir -p results && \
 		echo "" && \
-		echo "=== Running large CUDA measurement harness ===" && \
-		mkdir -p build/cuda && \
-		./build/cuda/xlpk_cuda_smoke --mode both --requests 32 --tokens 512 --draft-len 4 --csv build/cuda/cuda_results_large.csv; \
+		echo "=== Sweep: requests [4,8,16,32] x tokens [128,256,512] x draft_len [1,4,8] ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode sweep --requests 32 --tokens 512 --draft-len 8 --csv results/bench_large_$$(date +%Y%m%d_%H%M%S).csv && \
+		echo "" && \
+		echo "=== Summary ===" && \
+		python scripts/summarize_cuda_results.py results/bench_large_*.csv; \
 	else \
 		echo "nvcc not found - skipping large CUDA measurement harness."; \
 		echo "Install the CUDA toolkit (https://developer.nvidia.com/cuda-downloads)"; \

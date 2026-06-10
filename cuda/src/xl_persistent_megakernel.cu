@@ -10,11 +10,21 @@
  *   - Host launches this kernel once (host_kernel_launches = 1).
  *   - Host synchronizes once at completion (host_synchronizations = 1).
  *   - GPU owns the token loop: prefill → decode → verify → commit → repeat.
+ *   - Shutdown uses atomic done_counter: each block increments when its
+ *     request reaches is_done(); block 0 polls the aggregate counter and
+ *     sets shutdown_flag when all requests complete. This avoids the race
+ *     from a block-0 linear scan without a memory fence.
  *
  * Current status:
  *   - All math is fake/deterministic (control-flow scaffold only).
  *   - No real transformer attention, projection, or sampling.
  *   - The measurement target is orchestration overhead, not model FLOPs.
+ *
+ * Thread utilization:
+ *   - BLOCK_SIZE = 1 (one thread per block, one request per block).
+ *   - All stage helpers are called from a single thread; no warp-level
+ *     parallelism yet. Real parallelism comes in Phase 3 when stage
+ *     helpers become real fused kernels with warp-level work distribution.
  *
  * Future:
  *   - Real fused inference pipeline with real attention/decode kernels,
@@ -25,6 +35,7 @@
  * @param kv_table        KV page table with device-side page entries
  * @param draft_tokens    Shared draft token buffer (device memory)
  * @param shutdown_flag   Host/device flag; kernel exits when set
+ * @param done_counter    Aggregate counter; each block incs once when done
  * @param max_iterations  Safety bound on the internal loop
  * @param block_size      Speculative block size for draft proposal
  */
@@ -44,12 +55,14 @@ __global__ void xl_persistent_megakernel(
     KVPageTable kv_table,
     int* draft_tokens,
     int* shutdown_flag,
+    int* done_counter,
     int max_iterations,
     int block_size
 ) {
     if (blockIdx.x >= num_requests) return;
 
     RequestDescriptor* req = &requests[blockIdx.x];
+    bool already_counted = false;
 
     for (int iteration = 0; !(*shutdown_flag) && iteration < max_iterations; iteration++) {
         if (!req->is_done()) {
@@ -59,14 +72,20 @@ __global__ void xl_persistent_megakernel(
             stage_commit(req, &kv_table);
         }
 
-        if (blockIdx.x == 0 && threadIdx.x == 0) {
-            bool all_done = true;
-            for (int i = 0; i < num_requests; i++) {
-                if (!requests[i].is_done()) { all_done = false; break; }
+        if (!already_counted && req->is_done()) {
+            __threadfence();
+            atomicAdd(done_counter, 1);
+            already_counted = true;
+        }
+
+        if (blockIdx.x == 0) {
+            if (*done_counter >= num_requests) {
+                __threadfence();
+                *shutdown_flag = 1;
             }
-            if (all_done) *shutdown_flag = 1;
         }
 
         __syncthreads();
     }
-}
+    // TODO Phase 3: expand to warp-level parallelism when stage helpers
+    // become real fused kernels with shared-memory cooperative work.

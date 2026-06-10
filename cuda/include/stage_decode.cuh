@@ -21,6 +21,7 @@ __device__ __forceinline__ void stage_decode(
                 draft_tokens[req->draft_offset + i] =
                     (req->last_token + 1 + i + req->request_id) % 32000;
             }
+            __threadfence();
         }
 
         req->set_state(REQUEST_DRAFT_READY);

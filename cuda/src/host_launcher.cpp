@@ -11,15 +11,27 @@
  *   - host_synchronizations: how many times the CPU synchronizes with the GPU
  *   - elapsed_ms: wall time for the control-flow scaffold
  *   - tokens_per_second: throughput through deterministic stub math
+ *   - launch_reduction / sync_reduction: ratio of baseline to mega-kernel
+ *   - speedup_vs_baseline: elapsed_ms ratio (baseline / mega-kernel)
  *
  * All math is fake/deterministic. No real transformer operations.
  * The measurement target is launch/sync reduction, not model FLOPs.
  *
  * CLI usage:
  *   ./xlpk_cuda_smoke --mode both --requests 8 --tokens 128 --draft-len 4
+ *   ./xlpk_cuda_smoke --mode sweep --csv results.csv
  *
- * CSV output:
- *   --csv path.csv  (writes mode,requests,tokens_per_request,...,elapsed_ms,tokens_per_second)
+ * CSV output (--csv):
+ *   header: mode,requests,tokens_per_request,draft_len,
+ *           host_kernel_launches,host_synchronizations,
+ *           completed_requests,target_requests,
+ *           tokens_generated,elapsed_ms,tokens_per_second,
+ *           launch_reduction,sync_reduction,speedup_vs_baseline
+ *
+ * Sweep mode (--mode sweep):
+ *   Runs Cartesian product of requests [2,4,8,16],
+ *   tokens_per_request [32,64,128], draft_len [1,4,8]
+ *   writing one row per configuration and path.
  *
  * NVTX (optional):
  *   Compile with -DXLPK_ENABLE_NVTX to add NVTX range annotations
@@ -51,7 +63,8 @@
 extern __global__ void xl_persistent_megakernel(
     RequestDescriptor* requests, int num_requests,
     KVPageTable kv_table, int* draft_tokens,
-    int* shutdown_flag, int max_iterations, int block_size
+    int* shutdown_flag, int* done_counter,
+    int max_iterations, int block_size
 );
 
 extern __global__ void baseline_host_decode_step_kernel(
@@ -59,6 +72,7 @@ extern __global__ void baseline_host_decode_step_kernel(
 );
 
 constexpr int BLOCK_SIZE = 256;
+constexpr int MEGAKERNEL_BLOCK_SIZE = 1;
 constexpr int EOS_TOKEN_ID = 0;
 
 struct RunMetrics {
@@ -73,6 +87,9 @@ struct RunMetrics {
     int tokens_generated;
     float elapsed_ms;
     float tokens_per_second;
+    int launch_reduction;
+    int sync_reduction;
+    float speedup_vs_baseline;
 };
 
 static RequestDescriptor* alloc_and_copy_to_device(RequestDescriptor* host, int n) {
@@ -153,6 +170,9 @@ static RunMetrics run_baseline_path(
     m.tokens_generated = 0;
     m.elapsed_ms = 0.0f;
     m.tokens_per_second = 0.0f;
+    m.launch_reduction = 0;
+    m.sync_reduction = 0;
+    m.speedup_vs_baseline = 1.0f;
 
     RequestDescriptor* requests = new RequestDescriptor[N];
     init_requests(requests, N, tokens_per_request, false, 0);
@@ -213,6 +233,9 @@ static RunMetrics run_megakernel_path(
     m.tokens_generated = 0;
     m.elapsed_ms = 0.0f;
     m.tokens_per_second = 0.0f;
+    m.launch_reduction = 0;
+    m.sync_reduction = 0;
+    m.speedup_vs_baseline = 1.0f;
 
     int draft_offset_stride = draft_len * 4;
     int total_kv_entries = N * 4;
@@ -248,6 +271,10 @@ static RunMetrics run_megakernel_path(
     int zero = 0;
     CUDA_CHECK(cudaMemcpy(d_shutdown, &zero, sizeof(int), cudaMemcpyHostToDevice));
 
+    int* d_done_counter = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_done_counter, sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_done_counter, &zero, sizeof(int), cudaMemcpyHostToDevice));
+
     RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
 
     cudaEvent_t start, stop;
@@ -262,8 +289,8 @@ static RunMetrics run_megakernel_path(
 
     CUDA_CHECK(cudaEventRecord(start));
 
-    xl_persistent_megakernel<<<N, BLOCK_SIZE>>>(
-        d_reqs, N, host_kv_table, d_draft_tokens, d_shutdown,
+    xl_persistent_megakernel<<<N, MEGAKERNEL_BLOCK_SIZE>>>(
+        d_reqs, N, host_kv_table, d_draft_tokens, d_shutdown, d_done_counter,
         max_iterations, draft_len
     );
     CUDA_CHECK(cudaGetLastError());
@@ -293,9 +320,17 @@ static RunMetrics run_megakernel_path(
     CUDA_CHECK(cudaFree(d_kv_entries));
     CUDA_CHECK(cudaFree(d_draft_tokens));
     CUDA_CHECK(cudaFree(d_shutdown));
+    CUDA_CHECK(cudaFree(d_done_counter));
     delete[] requests;
     delete[] kv_entries;
     return m;
+}
+
+static void compute_reduction(RunMetrics& mega, const RunMetrics& baseline) {
+    mega.launch_reduction = baseline.host_kernel_launches;
+    mega.sync_reduction = baseline.host_synchronizations;
+    mega.speedup_vs_baseline = (mega.elapsed_ms > 0.0f)
+        ? (baseline.elapsed_ms / mega.elapsed_ms) : 1.0f;
 }
 
 static void print_metrics(const RunMetrics& m) {
@@ -305,10 +340,23 @@ static void print_metrics(const RunMetrics& m) {
     printf("  elapsed_ms: %.3f\n", m.elapsed_ms);
     printf("  tokens_generated: %d\n", m.tokens_generated);
     printf("  tokens_per_second: %.0f\n", m.tokens_per_second);
+    if (m.launch_reduction > 0) {
+        printf("  launch_reduction: %d:1\n", m.launch_reduction);
+        printf("  sync_reduction: %d:1\n", m.sync_reduction);
+        printf("  speedup_vs_baseline: %.2fx\n", m.speedup_vs_baseline);
+    }
+}
+
+static void write_csv_header(FILE* f) {
+    fprintf(f, "mode,requests,tokens_per_request,draft_len,"
+               "host_kernel_launches,host_synchronizations,"
+               "completed_requests,target_requests,"
+               "tokens_generated,elapsed_ms,tokens_per_second,"
+               "launch_reduction,sync_reduction,speedup_vs_baseline\n");
 }
 
 static void write_csv(FILE* f, const RunMetrics& m) {
-    fprintf(f, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.0f\n",
+    fprintf(f, "%s,%d,%d,%d,%d,%d,%d,%d,%d,%.3f,%.0f,%d,%d,%.2f\n",
             m.mode,
             m.requests,
             m.tokens_per_request,
@@ -319,7 +367,98 @@ static void write_csv(FILE* f, const RunMetrics& m) {
             m.target_requests,
             m.tokens_generated,
             m.elapsed_ms,
-            m.tokens_per_second);
+            m.tokens_per_second,
+            m.launch_reduction,
+            m.sync_reduction,
+            m.speedup_vs_baseline);
+}
+
+static void run_sweep_config(
+    int requests, int tokens, int draft_len, int iterations,
+    FILE* csv_file
+) {
+    RunMetrics baseline = run_baseline_path(requests, tokens, draft_len, iterations);
+    write_csv(csv_file, baseline);
+
+    RunMetrics mega = run_megakernel_path(requests, tokens, draft_len, iterations);
+    compute_reduction(mega, baseline);
+    write_csv(csv_file, mega);
+}
+
+static void run_sweep(const char* csv_path, int iterations,
+                       int cli_requests, int cli_tokens, int cli_draft_len)
+{
+    printf("\n========================================\n");
+    printf("Sweep Mode: Cartesian product over configs\n");
+    printf("========================================\n");
+
+    // Default sweep arrays
+    int request_vals[] = {2, 4, 8, 16};
+    int token_vals[] = {32, 64, 128};
+    int draft_vals[] = {1, 4, 8};
+
+    int n_default_requests = sizeof(request_vals) / sizeof(request_vals[0]);
+    int n_default_tokens = sizeof(token_vals) / sizeof(token_vals[0]);
+    int n_default_drafts = sizeof(draft_vals) / sizeof(draft_vals[0]);
+
+    // If user overrode a CLI default, scale the sweep to match
+    int max_req = (cli_requests != 8) ? cli_requests : request_vals[n_default_requests - 1];
+    int max_tok = (cli_tokens != 128) ? cli_tokens : token_vals[n_default_tokens - 1];
+    int max_drf = (cli_draft_len != 4) ? cli_draft_len : draft_vals[n_default_drafts - 1];
+
+    // Build request array
+    int req_arr[16];
+    int n_req = 0;
+    for (int v = 2; v <= max_req; v *= 2) req_arr[n_req++] = v;
+
+    int tok_arr[16];
+    int n_tok = 0;
+    for (int v = 32; v <= max_tok; v *= 2) tok_arr[n_tok++] = v;
+
+    int drf_arr[16];
+    int n_drf = 0;
+    for (int v = 1; v <= max_drf; v *= 2) drf_arr[n_drf++] = v;
+
+    int total_runs = n_req * n_tok * n_drf;
+
+    printf("Requests:        [");
+    for (int i = 0; i < n_req; i++) printf("%s%d", (i ? ", " : ""), req_arr[i]);
+    printf("]\nTokens/req:      [");
+    for (int i = 0; i < n_tok; i++) printf("%s%d", (i ? ", " : ""), tok_arr[i]);
+    printf("]\nDraft len:       [");
+    for (int i = 0; i < n_drf; i++) printf("%s%d", (i ? ", " : ""), drf_arr[i]);
+    printf("]\nTotal runs:      %d (%d rows in CSV)\n\n", total_runs, total_runs * 2);
+
+    FILE* csv_file = nullptr;
+    if (csv_path) {
+        csv_file = fopen(csv_path, "w");
+        if (!csv_file) {
+            fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
+            return;
+        }
+        write_csv_header(csv_file);
+    }
+
+    int run_count = 0;
+    for (int ri = 0; ri < n_req; ri++) {
+        for (int ti = 0; ti < n_tok; ti++) {
+            for (int di = 0; di < n_drf; di++) {
+                run_count++;
+                printf("[%d/%d] requests=%d tokens=%d draft_len=%d\n",
+                       run_count, total_runs, req_arr[ri], tok_arr[ti], drf_arr[di]);
+
+                run_sweep_config(req_arr[ri], tok_arr[ti], drf_arr[di],
+                                 iterations, csv_file);
+            }
+        }
+    }
+
+    if (csv_file) {
+        fclose(csv_file);
+        printf("\nCSV written to %s (%d rows)\n", csv_path, total_runs * 2);
+    }
+
+    printf("\nSweep complete.\n");
 }
 
 int main(int argc, char** argv) {
@@ -344,9 +483,14 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc) {
             csv_path = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--mode baseline|mega|both] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
             return 1;
         }
+    }
+
+    if (strcmp(mode, "sweep") == 0) {
+        run_sweep(csv_path, iterations, requests, tokens, draft_len);
+        return 0;
     }
 
     printf("========================================\n");
@@ -361,6 +505,16 @@ int main(int argc, char** argv) {
     bool do_baseline = (strcmp(mode, "baseline") == 0 || strcmp(mode, "both") == 0);
     bool do_mega = (strcmp(mode, "mega") == 0 || strcmp(mode, "both") == 0);
 
+    FILE* csv_file = nullptr;
+    if (csv_path != nullptr) {
+        csv_file = fopen(csv_path, "w");
+        if (csv_file == nullptr) {
+            fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
+            return 1;
+        }
+        write_csv_header(csv_file);
+    }
+
     RunMetrics baseline_metrics = {};
     RunMetrics mega_metrics = {};
 
@@ -374,6 +528,7 @@ int main(int argc, char** argv) {
 
         printf("\nBaseline host-launched decode:\n");
         print_metrics(baseline_metrics);
+        if (csv_file) write_csv(csv_file, baseline_metrics);
     }
 
     if (do_mega) {
@@ -383,9 +538,18 @@ int main(int argc, char** argv) {
         printf("========================================\n\n");
 
         mega_metrics = run_megakernel_path(requests, tokens, draft_len, iterations);
+        if (do_baseline) {
+            compute_reduction(mega_metrics, baseline_metrics);
+        }
 
         printf("\nPersistent mega-kernel:\n");
         print_metrics(mega_metrics);
+        if (csv_file) write_csv(csv_file, mega_metrics);
+    }
+
+    if (csv_file) {
+        fclose(csv_file);
+        printf("\nCSV written to %s\n", csv_path);
     }
 
     if (do_baseline && do_mega && baseline_metrics.elapsed_ms > 0.0f) {
@@ -405,23 +569,8 @@ int main(int argc, char** argv) {
         printf("  speedup_vs_baseline: %.2fx\n", speedup);
     }
 
-    if (csv_path != nullptr) {
-        FILE* f = fopen(csv_path, "w");
-        if (f == nullptr) {
-            fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
-            return 1;
-        }
-        fprintf(f, "mode,requests,tokens_per_request,draft_len,"
-                   "host_kernel_launches,host_synchronizations,"
-                   "completed_requests,target_requests,"
-                   "tokens_generated,elapsed_ms,tokens_per_second\n");
-        if (do_baseline) write_csv(f, baseline_metrics);
-        if (do_mega) write_csv(f, mega_metrics);
-        fclose(f);
-        printf("\nCSV written to %s\n", csv_path);
-    }
-
     if (do_baseline && do_mega) {
+        printf("\n=== Validation ===\n");
         bool baseline_ok = (baseline_metrics.completed_requests == baseline_metrics.target_requests);
         bool mega_ok = (mega_metrics.completed_requests == mega_metrics.target_requests);
         bool baseline_launches_gt1 = (baseline_metrics.host_kernel_launches > 1);
@@ -429,7 +578,6 @@ int main(int argc, char** argv) {
         bool baseline_syncs_gt1 = (baseline_metrics.host_synchronizations > 1);
         bool mega_syncs_eq1 = (mega_metrics.host_synchronizations == 1);
 
-        printf("\n=== Validation ===\n");
         printf("  baseline completed all requests: %s\n", baseline_ok ? "PASS" : "FAIL");
         printf("  mega-kernel completed all requests: %s\n", mega_ok ? "PASS" : "FAIL");
         printf("  baseline launches > 1: %s (%d)\n", baseline_launches_gt1 ? "PASS" : "FAIL", baseline_metrics.host_kernel_launches);
