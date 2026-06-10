@@ -30,15 +30,17 @@ addopts = "-v --tb=short"
 target-version = "py310"
 line-length = 100
 indent-width = 4
+preview = false
+src = ["src"]
+
+[tool.ruff.lint]
 select = [
     "E", "F", "I", "UP", "W", "C4", "C90", "PTH", "PIE", "T20", "PYI",
 ]
 ignore = []
 fixable = ["F", "I", "UP", "W", "C4", "C90", "PTH", "PIE", "T20"]
 unfixable = []
-per-file-ignores = {}
-preview = false
-src = ["src"]
+per-file-ignores = {"src/megakernel_lab/demo.py" = ["T20"]}
 
 [tool.ruff.format]
 quote-style = "double"

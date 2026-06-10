@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import heapq
+from dataclasses import dataclass, field
 
 from .backend import AbstractKernelBackend, CPUStubBackend
 from .config import RuntimeConfig
@@ -60,10 +60,14 @@ class PrefillWorker:
         self.kv_cache = kv_cache
         self.stats = WorkerStats()
 
-    def process(self, request: RequestState, now_ms: float) -> tuple[RequestState, KVSnapshot, float]:
+    def process(
+        self, request: RequestState, now_ms: float
+    ) -> tuple[RequestState, KVSnapshot, float]:
         request.phase = RequestPhase.PREFILL
         total_tokens = len(request.prompt_tokens)
-        layer_page_map = self.kv_cache.allocate_for_request(request, total_tokens=total_tokens, pinned=False)
+        layer_page_map = self.kv_cache.allocate_for_request(
+            request, total_tokens=total_tokens, pinned=False
+        )
         page_ids = [page_id for pages in layer_page_map.values() for page_id in pages]
         self.kv_cache.touch_pages(page_ids)
         snapshot = self.backend.prefill(request.prompt_tokens, page_ids)
@@ -102,7 +106,9 @@ class DecodeWorker:
         self.block_size = block_size
         self.stats = WorkerStats()
 
-    def process(self, request: RequestState, now_ms: float) -> tuple[RequestState, DecodeStepTrace, float]:
+    def process(
+        self, request: RequestState, now_ms: float
+    ) -> tuple[RequestState, DecodeStepTrace, float]:
         request.phase = RequestPhase.DECODE
         request.decode_worker_id = self.worker_id
         self.kv_cache.pin_pages(request.kv_page_ids)
@@ -219,15 +225,15 @@ class WorkerPool:
                     prefill_worker_id=worker.worker_id,
                     decode_worker_id=decode_worker.worker_id,
                     page_ids=[
-                        page_id
-                        for pages in snapshot.layer_page_map.values()
-                        for page_id in pages
+                        page_id for pages in snapshot.layer_page_map.values() for page_id in pages
                     ],
                 )
             )
         return completed, spent_ms
 
-    def dispatch_decode(self, now_ms: float) -> tuple[list[tuple[RequestState, DecodeStepTrace]], float]:
+    def dispatch_decode(
+        self, now_ms: float
+    ) -> tuple[list[tuple[RequestState, DecodeStepTrace]], float]:
         results: list[tuple[RequestState, DecodeStepTrace]] = []
         spent_ms = 0.0
         workers = max(1, len(self.decode_workers))
@@ -305,11 +311,12 @@ class PersistentDecodeRuntime:
         total_accepted = sum(len(trace.accepted_tokens) for trace in traces)
         total_proposed = sum(len(trace.proposed_tokens) for trace in traces)
         acceptance_rate = 0.0 if total_proposed == 0 else total_accepted / total_proposed
-        ttft_ms = (
-            (request.first_decode_ms or self._virtual_time_ms)
-            - (request.prefill_complete_ms or 0.0)
+        ttft_ms = (request.first_decode_ms or self._virtual_time_ms) - (
+            request.prefill_complete_ms or 0.0
         )
-        inter_token_latency_ms = [trace.backend_latency_ms for trace in traces if trace.accepted_tokens]
+        inter_token_latency_ms = [
+            trace.backend_latency_ms for trace in traces if trace.accepted_tokens
+        ]
         return DecodeResult(
             request_id=request.request_id,
             prompt_tokens=list(request.prompt_tokens),

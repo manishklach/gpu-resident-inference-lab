@@ -11,7 +11,6 @@ Exports expanded CSV with memory metrics for analysis.
 
 from __future__ import annotations
 
-import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
@@ -85,7 +84,9 @@ class BenchmarkRunner:
         self.block_sizes = block_sizes or [1, 2, 4, 8]
         self.modes = modes or [BenchmarkMode.SPECULATIVE_DECODE]
 
-    def _build_request(self, request_id: int, max_new_tokens: int, eos_token_id: int) -> RequestState:
+    def _build_request(
+        self, request_id: int, max_new_tokens: int, eos_token_id: int
+    ) -> RequestState:
         base = 100 + request_id
         target = [base + idx for idx in range(4)] + [eos_token_id]
         return RequestState(
@@ -166,7 +167,9 @@ class BenchmarkRunner:
             backend=backend,
         )
         for request_id in range(batch_size):
-            runtime.submit(self._build_request(request_id, config.max_new_tokens, config.eos_token_id))
+            runtime.submit(
+                self._build_request(request_id, config.max_new_tokens, config.eos_token_id)
+            )
         results = runtime.run()
         report = runtime.kv_cache.residency_report()
 
@@ -207,7 +210,9 @@ class BenchmarkRunner:
         records: list[BenchmarkRecord] = []
         for mode in active_modes:
             for batch_size in self.batch_sizes:
-                effective_block_sizes = [1] if mode == BenchmarkMode.SERIAL_DECODE else self.block_sizes
+                effective_block_sizes = (
+                    [1] if mode == BenchmarkMode.SERIAL_DECODE else self.block_sizes
+                )
                 for block_size in effective_block_sizes:
                     record = self._run_single(batch_size, block_size, mode)
                     records.append(record)

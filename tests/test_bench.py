@@ -1,12 +1,9 @@
 """Tests for benchmark harness schema and output validation."""
 
 import tempfile
-from pathlib import Path
-
-import pandas as pd
+from dataclasses import asdict
 
 from megakernel_lab.bench import BenchmarkMode, BenchmarkRecord, BenchmarkRunner
-
 
 EXPECTED_COLUMNS = [
     "batch_size",
@@ -95,8 +92,7 @@ def test_benchmark_runner_kv_pressure_mode() -> None:
 def test_benchmark_csv_output_has_all_columns() -> None:
     """CSV file should have all expected columns."""
     runner = BenchmarkRunner(batch_sizes=[1], block_sizes=[2])
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Override the results directory by running and checking the file
+    with tempfile.TemporaryDirectory():
         df = runner.run(modes=[BenchmarkMode.SERIAL_DECODE])
         # The runner writes to results/ in cwd, so just check the DataFrame
         assert list(df.columns) == EXPECTED_COLUMNS
@@ -132,7 +128,3 @@ def test_benchmark_memory_metrics_non_negative() -> None:
     assert df.iloc[0]["pinned_kv_bytes"] >= 0
     assert df.iloc[0]["eviction_count"] >= 0
     assert 0.0 <= df.iloc[0]["fragmentation_ratio"] <= 1.0
-
-
-# Need this import for the field check test
-from dataclasses import asdict

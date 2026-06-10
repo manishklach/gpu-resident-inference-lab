@@ -11,7 +11,7 @@ This module tracks paged KV residency with:
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from math import ceil
 
 from .config import RuntimeConfig
@@ -93,7 +93,9 @@ class KVCache:
     def _required_pages(self, token_count: int) -> int:
         return 0 if token_count <= 0 else ceil(token_count / self.page_size)
 
-    def _pages_needed_for_layer(self, request: RequestState, layer_id: int, num_new_tokens: int) -> int:
+    def _pages_needed_for_layer(
+        self, request: RequestState, layer_id: int, num_new_tokens: int
+    ) -> int:
         key = (request.request_id, layer_id)
         existing_pages = len(self._page_table.get(key, []))
         current_tokens = len(request.prompt_tokens) + len(request.committed_tokens)
@@ -209,7 +211,9 @@ class KVCache:
             self._pinned_kv_bytes += page_bytes
         return page_id
 
-    def allocate_for_request(self, request: RequestState, total_tokens: int, pinned: bool) -> dict[int, list[int]]:
+    def allocate_for_request(
+        self, request: RequestState, total_tokens: int, pinned: bool
+    ) -> dict[int, list[int]]:
         """Ensure the request has enough pages for `total_tokens` across layers."""
         pages_needed = 0
         for layer_id in request.layer_ids:
@@ -246,7 +250,9 @@ class KVCache:
             layer_page_map[layer_id] = page_ids
         return layer_page_map
 
-    def commit_tokens(self, request: RequestState, num_new_tokens: int, pin: bool = True) -> dict[int, list[int]]:
+    def commit_tokens(
+        self, request: RequestState, num_new_tokens: int, pin: bool = True
+    ) -> dict[int, list[int]]:
         """Commit additional tokens by making sure pages exist for them.
 
         Mark allocated pages as committed (finalized) rather than draft.
@@ -262,7 +268,9 @@ class KVCache:
                     page.is_draft = False
         return layer_page_map
 
-    def allocate_draft_pages(self, request: RequestState, num_new_tokens: int) -> dict[int, list[int]]:
+    def allocate_draft_pages(
+        self, request: RequestState, num_new_tokens: int
+    ) -> dict[int, list[int]]:
         """Allocate speculative (draft) pages that can be discarded on rejection.
 
         These pages are marked as draft and not committed until verify_accept is called.
