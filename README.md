@@ -1,6 +1,11 @@
 # XL-Persistent-Kernel
 
-**CPU-first control-plane simulator and CUDA staging ground for persistent-kernel LLM decode.**
+[![CI](https://github.com/manishklach/XL-Persistent-Kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/manishklach/XL-Persistent-Kernel/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License: Research](https://img.shields.io/badge/license-Research%20Use-yellow)](LICENSE)
+[![Blog](https://img.shields.io/badge/GitHub%20Pages-blog-green)](https://manishklach.github.io/XL-Persistent-Kernel/)
+
+**CPU-first control-plane simulator and CUDA staging ground for persistent-kernel LLM decode.** · [Read the blog](https://manishklach.github.io/XL-Persistent-Kernel/)
 
 This repository is not a production inference stack. It is a research scaffold for building the control flow, scheduling, and memory-management infrastructure that a persistent CUDA decode kernel will eventually need.
 
