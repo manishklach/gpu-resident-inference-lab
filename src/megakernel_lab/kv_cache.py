@@ -1,28 +1,224 @@
-"""KV-cache abstractions for the runtime simulation."""
+"""Paged KV-cache planner for the persistent runtime simulation."""
 
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import dataclass
+from math import ceil
+
+from .state import RequestState
 
 
 @dataclass(slots=True)
 class KVPage:
-    """A tiny placeholder for a committed KV region."""
+    """Represents one physical KV page."""
 
+    page_id: int
     request_id: int
-    token_positions: list[int] = field(default_factory=list)
+    layer_id: int
+    token_start: int
+    token_count: int
+    pinned: bool = False
 
 
 class KVCache:
-    """Tracks committed positions as if they were device-resident KV entries."""
+    """Tracks paged KV residency with LRU eviction and pinning support."""
 
-    def __init__(self) -> None:
+    def __init__(self, page_size: int = 4, max_pages: int = 64) -> None:
+        self.page_size = page_size
+        self.max_pages = max_pages
+        self._next_page_id = 0
         self._pages: dict[int, KVPage] = {}
+        self._page_table: dict[tuple[int, int], list[int]] = {}
+        self._lru: OrderedDict[int, None] = OrderedDict()
+        self._eviction_count = 0
+        self._access_count = 0
+        self._hit_count = 0
 
-    def commit(self, request_id: int, num_tokens: int, starting_pos: int) -> None:
-        """Mark positions as committed for one request."""
-        page = self._pages.setdefault(request_id, KVPage(request_id=request_id))
-        page.token_positions.extend(range(starting_pos, starting_pos + num_tokens))
+    def _required_pages(self, token_count: int) -> int:
+        return 0 if token_count <= 0 else ceil(token_count / self.page_size)
+
+    def _pages_needed_for_layer(self, request: RequestState, layer_id: int, num_new_tokens: int) -> int:
+        key = (request.request_id, layer_id)
+        existing_pages = len(self._page_table.get(key, []))
+        current_tokens = len(request.prompt_tokens) + len(request.committed_tokens)
+        new_total = current_tokens + num_new_tokens
+        required_pages = self._required_pages(new_total)
+        return max(required_pages - existing_pages, 0)
+
+    def can_allocate(self, request: RequestState, num_new_tokens: int) -> bool:
+        """Return whether enough pages could be available for the allocation."""
+        needed = sum(
+            self._pages_needed_for_layer(request, layer_id, num_new_tokens)
+            for layer_id in request.layer_ids
+        )
+        if needed == 0:
+            return True
+        free_pages = self.max_pages - len(self._pages)
+        evictable = sum(1 for page in self._pages.values() if not page.pinned)
+        return free_pages + evictable >= needed
+
+    def evict_lru(self, n_pages: int) -> list[int]:
+        """Evict up to `n_pages` least-recently-used unpinned pages."""
+        evicted: list[int] = []
+        for page_id in list(self._lru.keys()):
+            if len(evicted) >= n_pages:
+                break
+            page = self._pages[page_id]
+            if page.pinned:
+                continue
+            evicted.append(page_id)
+            self._lru.pop(page_id, None)
+            self._pages.pop(page_id, None)
+            key = (page.request_id, page.layer_id)
+            page_ids = self._page_table.get(key, [])
+            if page_id in page_ids:
+                page_ids.remove(page_id)
+                if not page_ids:
+                    self._page_table.pop(key, None)
+            self._eviction_count += 1
+        return evicted
+
+    def ensure_capacity(self, request: RequestState, num_new_tokens: int) -> None:
+        """Evict as needed and fail if the allocation still cannot fit."""
+        needed = sum(
+            self._pages_needed_for_layer(request, layer_id, num_new_tokens)
+            for layer_id in request.layer_ids
+        )
+        free_pages = self.max_pages - len(self._pages)
+        deficit = max(needed - free_pages, 0)
+        if deficit > 0:
+            self.evict_lru(deficit)
+        if not self.can_allocate(request, num_new_tokens):
+            raise RuntimeError("KV cache cannot allocate pages for request")
+
+    def _allocate_one_page(
+        self,
+        request_id: int,
+        layer_id: int,
+        token_start: int,
+        token_count: int,
+        pinned: bool,
+    ) -> int:
+        page_id = self._next_page_id
+        self._next_page_id += 1
+        page = KVPage(
+            page_id=page_id,
+            request_id=request_id,
+            layer_id=layer_id,
+            token_start=token_start,
+            token_count=token_count,
+            pinned=pinned,
+        )
+        self._pages[page_id] = page
+        self._lru[page_id] = None
+        self._lru.move_to_end(page_id)
+        self._page_table.setdefault((request_id, layer_id), []).append(page_id)
+        return page_id
+
+    def allocate_for_request(self, request: RequestState, total_tokens: int, pinned: bool) -> dict[int, list[int]]:
+        """Ensure the request has enough pages for `total_tokens` across layers."""
+        pages_needed = 0
+        for layer_id in request.layer_ids:
+            key = (request.request_id, layer_id)
+            existing_pages = len(self._page_table.get(key, []))
+            required_pages = self._required_pages(total_tokens)
+            pages_needed += max(required_pages - existing_pages, 0)
+        free_pages = self.max_pages - len(self._pages)
+        deficit = max(pages_needed - free_pages, 0)
+        if deficit > 0:
+            self.evict_lru(deficit)
+        if (self.max_pages - len(self._pages)) < pages_needed:
+            raise RuntimeError("KV cache cannot allocate pages for request")
+        layer_page_map: dict[int, list[int]] = {}
+        for layer_id in request.layer_ids:
+            key = (request.request_id, layer_id)
+            page_ids = list(self._page_table.get(key, []))
+            existing_capacity = len(page_ids) * self.page_size
+            if total_tokens > existing_capacity:
+                missing = total_tokens - existing_capacity
+                pages_needed = ceil(missing / self.page_size)
+                token_start = existing_capacity
+                for _ in range(pages_needed):
+                    token_count = min(self.page_size, total_tokens - token_start)
+                    page_id = self._allocate_one_page(
+                        request_id=request.request_id,
+                        layer_id=layer_id,
+                        token_start=token_start,
+                        token_count=token_count,
+                        pinned=pinned,
+                    )
+                    page_ids.append(page_id)
+                    token_start += token_count
+            layer_page_map[layer_id] = page_ids
+        return layer_page_map
+
+    def commit_tokens(self, request: RequestState, num_new_tokens: int, pin: bool = True) -> dict[int, list[int]]:
+        """Commit additional tokens by making sure pages exist for them."""
+        total_tokens = len(request.prompt_tokens) + len(request.committed_tokens) + num_new_tokens
+        return self.allocate_for_request(request, total_tokens=total_tokens, pinned=pin)
+
+    def pin_pages(self, page_ids: list[int]) -> None:
+        """Pin physical pages so they are protected from eviction."""
+        for page_id in page_ids:
+            page = self._pages.get(page_id)
+            if page is not None:
+                page.pinned = True
+
+    def unpin_pages(self, page_ids: list[int]) -> None:
+        """Unpin physical pages so they may be evicted."""
+        for page_id in page_ids:
+            page = self._pages.get(page_id)
+            if page is not None:
+                page.pinned = False
+
+    def touch_pages(self, page_ids: list[int]) -> None:
+        """Mark pages as recently used and account for residency hits."""
+        for page_id in page_ids:
+            self._access_count += 1
+            page = self._pages.get(page_id)
+            if page is not None:
+                self._hit_count += 1
+                if page_id in self._lru:
+                    self._lru.move_to_end(page_id)
+
+    def touch_request(self, request: RequestState) -> None:
+        """Touch every page currently associated with the request."""
+        self.touch_pages(request.kv_page_ids)
+
+    def page_ids_for(self, request_id: int, layer_id: int) -> list[int]:
+        """Return the pages mapped to one request/layer pair."""
+        return list(self._page_table.get((request_id, layer_id), []))
 
     def positions_for(self, request_id: int) -> list[int]:
-        """Return committed positions for the request."""
-        page = self._pages.get(request_id)
-        return [] if page is None else list(page.token_positions)
+        """Return token positions currently covered by the request's pages."""
+        positions: list[int] = []
+        for (req_id, _layer_id), page_ids in self._page_table.items():
+            if req_id != request_id:
+                continue
+            for page_id in page_ids:
+                page = self._pages.get(page_id)
+                if page is None:
+                    continue
+                positions.extend(range(page.token_start, page.token_start + page.token_count))
+            break
+        return positions
+
+    def release_request(self, request_id: int) -> None:
+        """Drop all pages belonging to a request."""
+        keys = [key for key in self._page_table if key[0] == request_id]
+        for key in keys:
+            for page_id in self._page_table.pop(key, []):
+                self._pages.pop(page_id, None)
+                self._lru.pop(page_id, None)
+
+    def residency_report(self) -> dict[str, float | int]:
+        """Return a small cache residency summary."""
+        pinned = sum(1 for page in self._pages.values() if page.pinned)
+        hit_rate = 0.0 if self._access_count == 0 else self._hit_count / self._access_count
+        return {
+            "hit_rate": hit_rate,
+            "eviction_count": self._eviction_count,
+            "live_pages": len(self._pages),
+            "pinned_pages": pinned,
+        }

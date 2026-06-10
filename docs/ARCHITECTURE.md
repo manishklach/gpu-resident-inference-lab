@@ -9,7 +9,13 @@ Build a persistent decode runtime that can eventually host a mega-kernel style e
 - speculative block proposal and acceptance
 - minimal host orchestration
 
-This repo starts with a simulation of that architecture.
+This repo now implements the full CPU-side Phase 1 architecture:
+
+- prefill workers
+- decode workers
+- prefill-to-decode KV handoff
+- paged KV-cache planning
+- a CUDA-transparent backend interface
 
 ## Core Concepts
 
@@ -46,10 +52,13 @@ This mirrors what a real on-device request descriptor would track.
 
 The KV-cache abstraction tracks which committed positions belong to which request.
 
-The current implementation is intentionally simple:
+The current implementation includes:
 
-- one request id
-- positions committed so far
+- fixed-size KV pages
+- layer-aware page tables
+- pinned pages for active decode
+- LRU eviction under pressure
+- residency reporting
 
 Later, this can evolve into:
 
@@ -76,7 +85,8 @@ The simulator separates runtime logic from kernel logic.
 
 Today:
 
-- proposer and verifier are Python objects
+- `AbstractKernelBackend` defines `prefill`, `decode_step`, `speculative_verify`, and `copy_kv_pages`
+- `CPUStubBackend` simulates latency and deterministic correctness
 
 Later:
 
@@ -88,9 +98,9 @@ Later:
 
 ### Phase 1
 
-- implement a single-request persistent decode kernel
-- keep token buffer and request metadata on device
-- model one speculative block per iteration
+- CPU worker specialization and handoff
+- paged KV-cache planning
+- benchmarkable backend abstraction
 
 ### Phase 2
 

@@ -1,19 +1,19 @@
 """Speculative decode building blocks."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
-from .state import DecodeRequest
+from .backend import AbstractKernelBackend
+from .state import AcceptanceMask, RequestState
 
 
 @dataclass(slots=True)
 class AcceptancePolicy:
-    """A deterministic acceptance policy for the simulator.
-
-    `mismatch_stride` lets us inject occasional rejection tails so we can
-    exercise the speculative control flow without a real verifier model.
-    """
+    """Deterministic controls for simulated speculative verification."""
 
     mismatch_stride: int = 0
+    reject_draft_blocks: bool = False
 
 
 class DraftBlockProposer:
@@ -23,14 +23,15 @@ class DraftBlockProposer:
         self.block_size = block_size
         self.eos_token_id = eos_token_id
 
-    def propose(self, request: DecodeRequest) -> list[int]:
+    def propose(self, request: RequestState, block_size: int | None = None) -> list[int]:
         """Draft up to `block_size` next tokens."""
         remaining = request.remaining_target()
         budget = request.token_budget_left()
         if not remaining or budget == 0:
             return [self.eos_token_id]
 
-        count = min(self.block_size, len(remaining), budget)
+        width = self.block_size if block_size is None else block_size
+        count = min(width, len(remaining), budget)
         return remaining[:count]
 
 
@@ -40,20 +41,35 @@ class SpeculativeVerifier:
     def __init__(self, policy: AcceptancePolicy) -> None:
         self.policy = policy
 
-    def verify(self, request: DecodeRequest, proposal: list[int]) -> int:
-        """Return the accepted prefix length of `proposal`."""
-        expected = request.remaining_target()
-        max_accept = min(len(proposal), len(expected), request.token_budget_left())
-        accepted = 0
+    def verify(
+        self,
+        request: RequestState,
+        proposal: list[int],
+        kv_pages: list[int],
+        backend: AbstractKernelBackend,
+    ) -> AcceptanceMask:
+        """Return the accepted prefix mask for `proposal`."""
+        if self.policy.reject_draft_blocks and len(proposal) > 1:
+            return AcceptanceMask(accepted=[False for _ in proposal], latency_ms=0.0)
 
-        for idx in range(max_accept):
-            if proposal[idx] != expected[idx]:
-                break
+        backend_mask = backend.speculative_verify(proposal, kv_pages)
+        expected = request.remaining_target()
+        result: list[bool] = []
+        for idx, token in enumerate(proposal):
+            accepted = idx < len(expected) and token == expected[idx]
+            if idx < len(backend_mask.accepted):
+                accepted = accepted and backend_mask.accepted[idx]
             if self.policy.mismatch_stride > 0:
                 absolute_pos = len(request.committed_tokens) + idx + 1
                 if absolute_pos % self.policy.mismatch_stride == 0 and idx < len(proposal) - 1:
-                    accepted += 1
+                    accepted = True
+                    result.append(accepted)
                     break
-            accepted += 1
+            if not accepted:
+                result.append(False)
+                break
+            result.append(True)
 
-        return accepted
+        if len(result) < len(proposal):
+            result.extend([False] * (len(proposal) - len(result)))
+        return AcceptanceMask(accepted=result, latency_ms=backend_mask.latency_ms)
