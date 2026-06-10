@@ -5,11 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "XL-Persistent-Kernel"
 version = "0.1.0"
-description = "Prototype persistent decode runtime for mega-kernel style LLM inference"
+description = "CPU-first control-plane simulator and CUDA staging ground for persistent-kernel LLM decode"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "OpenAI Codex" }]
 dependencies = ["pandas>=2.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4", "black>=24.0", "mypy>=1.10"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -19,3 +22,39 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+indent-width = 4
+select = [
+    "E", "F", "I", "UP", "W", "C4", "C90", "PTH", "PIE", "T20", "PYI",
+]
+ignore = []
+fixable = ["F", "I", "UP", "W", "C4", "C90", "PTH", "PIE", "T20"]
+unfixable = []
+per-file-ignores = {}
+preview = false
+src = ["src"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+include = "\\.pyi?$"
+extend-exclude = ""
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

@@ -1,6 +1,7 @@
 """Small runnable demo for the persistent decode simulator."""
 
 from .backend import CPUStubBackend
+from .bench import BenchmarkMode, BenchmarkRunner
 from .config import RuntimeConfig
 from .runtime import PersistentDecodeRuntime
 from .spec_decode import AcceptancePolicy, DraftBlockProposer, SpeculativeVerifier
@@ -59,7 +60,10 @@ def run_demo(block_size: int, mismatch_stride: int, reject_draft_blocks: bool = 
 
 
 def main() -> None:
-    """Compare serial decode with larger speculative blocks."""
+    """Compare serial decode with larger speculative blocks, then run benchmarks."""
+    print("=== Decode Mode Comparison ===")
+    print()
+
     print("Serial-style decode")
     run_demo(block_size=1, mismatch_stride=0)
 
@@ -71,6 +75,17 @@ def main() -> None:
 
     print("Speculative block decode with serial fallback")
     run_demo(block_size=4, mismatch_stride=0, reject_draft_blocks=True)
+
+    print("=== Benchmark Modes ===")
+    print()
+
+    runner = BenchmarkRunner(batch_sizes=[1, 4, 8], block_sizes=[1, 2, 4])
+
+    for mode in BenchmarkMode:
+        print(f"--- {mode.value} ---")
+        df = runner.run(modes=[mode])
+        print(df.to_string(index=False))
+        print()
 
 
 if __name__ == "__main__":

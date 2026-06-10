@@ -1,102 +1,171 @@
 # XL-Persistent-Kernel
 
-`XL-Persistent-Kernel` is a prototype repository for building a Mirage/TileRT-style persistent decode runtime for large language model inference.
+**CPU-first control-plane simulator and CUDA staging ground for persistent-kernel LLM decode.**
 
-The goal is not to pretend we already have Xiaomi's production stack. The goal is to build the right scaffolding:
+This repository is not a production inference stack. It is a research scaffold for building the control flow, scheduling, and memory-management infrastructure that a persistent CUDA decode kernel will eventually need.
 
-- a persistent decode state machine
-- GPU-oriented request and KV-cache abstractions
-- a speculative block proposal and acceptance flow
-- clear boundaries between model logic, runtime scheduling, and backend kernels
+The simulator runs entirely on CPU today, but it is structured so that every abstractions (backend, KV-cache, request descriptors) can be swapped for real device implementations without rewriting the runtime.
 
-This version is still CPU-only, but it now covers the Phase 1 architecture we need before touching CUDA:
+## Architecture
 
-- specialized prefill and decode workers
-- a paged KV-cache planner with pinning and LRU eviction
-- a pluggable backend interface that a future CUDA runtime can implement unchanged
-- a benchmark harness for TTFT, ITL, acceptance rate, and KV hit rate
+```mermaid
+graph LR
+    A[Request Submit] --> B[Prefill Worker]
+    B --> C[KV Page Planner]
+    C --> D[Decode Worker]
+    D --> E[Speculative Proposer]
+    E --> F[Verifier]
+    F -->|Accepted| G[Commit Tokens]
+    F -->|Rejected| H[Discard Draft Pages]
+    G --> I[Request Complete]
+    H --> D
 
-## What This Repo Contains
+    style A fill:#e1f5fe
+    style B fill:#fff3e0
+    style C fill:#fff3e0
+    style D fill:#e8f5e9
+    style E fill:#e8f5e9
+    style F fill:#fce4ec
+    style G fill:#c8e6c9
+    style H fill:#ffcdd2
+    style I fill:#c8e6c9
+```
 
-- `docs/ARCHITECTURE.md`
-  - MVP architecture for a persistent mega-kernel runtime
-- `src/megakernel_lab/runtime.py`
-  - persistent runtime with worker specialization, scheduling, and handoff
-- `src/megakernel_lab/spec_decode.py`
-  - speculative block proposal and acceptance policy
-- `src/megakernel_lab/state.py`
-  - request, token, and scheduler state
-- `src/megakernel_lab/kv_cache.py`
-  - paged KV-cache planner with LRU eviction and pinning
-- `src/megakernel_lab/backend.py`
-  - abstract backend interface plus CPU stub backend
-- `src/megakernel_lab/bench.py`
-  - benchmark harness and CSV export
-- `src/megakernel_lab/demo.py`
-  - runnable demo comparing serial, speculative, and fallback decode
-- `tests/`
-  - worker, fallback, preemption, handoff, and KV-cache coverage
+**Request lifecycle:**
 
-## Design Intent
+1. A request is submitted with prompt tokens and a target output sequence.
+2. The **prefill worker** processes the prompt and builds the initial KV-cache pages.
+3. The **KV page planner** allocates physical pages across all layers.
+4. The **decode worker** pins the active pages and runs the decode loop.
+5. The **speculative proposer** drafts a block of candidate tokens.
+6. The **verifier** checks the draft against the target and the backend.
+7. Accepted tokens are committed; rejected draft pages are released.
+8. The request completes when EOS is hit, the token budget is exhausted, or the target is fully matched.
 
-We are modeling the same high-level split that shows up in Mirage and TileRT:
+## What Is Implemented Today
 
-- model side
-  - token proposal
-  - speculative block behavior
-  - quantized weight / KV assumptions
-- runtime side
-  - request queueing
-  - persistent worker loop
-  - token commit / rejection handling
-  - KV residency and scheduler ownership
-- backend side
-  - future CUDA kernels
-  - future fused operators
-  - future multi-GPU communication overlap
+- **Runtime simulator** with specialized prefill and decode workers
+- **Speculative block proposal and verification** with configurable acceptance policy
+- **Paged KV-cache planner** with LRU eviction, pinning, and memory accounting
+- **Backend interface** (`AbstractKernelBackend`) + deterministic CPU stub backend
+- **Benchmark harness** exporting TTFT, ITL, acceptance rate, KV hit rate, live/pinned KV bytes, fragmentation
+- **Speculative KV distinction** between committed and draft pages
+- **CUDA staging layer** with a persistent-kernel stub (optional build)
+- **CI pipeline** (pytest + ruff + mypy on Python 3.10/3.11/3.12)
+- **Tests** covering runtime, KV cache, speculative KV lifecycle, and benchmark schema
 
-## MVP Roadmap
+## What Is Not Implemented Yet
 
-1. CPU simulator for persistent decode loop
-2. explicit request queue and worker specialization model
-3. paged KV-cache planner
-4. backend interface for pluggable kernels
-5. single-GPU CUDA prototype
-6. speculative verify path in CUDA
-7. multi-GPU overlap and communication
+- Real CUDA attention / projection / sampling kernels
+- Fused speculative-verify kernels
+- Device-resident request descriptors and work queues
+- Multi-GPU / NVLink communication overlap
+- Continuous batching with dynamic request admission
+- Real transformer math on device
+- Quantized weight and KV support
+- Memory-mapped model loading
 
-Roadmap status:
+These are planned phases (see [docs/ROADMAP.md](docs/ROADMAP.md)).
 
-- `1-4` are now implemented in Python
-- `5-7` remain ahead
+## Why Persistent Kernels Matter
+
+Traditional LLM decode launches one kernel per token per request:
+
+```
+Host: launch attention kernel -> wait -> launch projection -> wait -> sample -> wait -> repeat
+```
+
+Each launch incurs host-device synchronization, kernel launch overhead, and memory fence costs. For small batch sizes, this dominates runtime.
+
+A persistent kernel keeps one long-lived GPU loop running:
+
+```
+Device: loop {
+  read request descriptor from global memory
+  load KV pages
+  run attention + projection + sample
+  write new token and update decode position
+  if done, write completion status
+}
+```
+
+The kernel never returns to the host until all requests complete. The host only manages request admission, KV page allocation, and completion callbacks.
+
+This is the execution model behind production systems like vLLM's persistent batch, Xiaomi's Mirage/TileRT, and SGLang's RadixAttention. This repository builds the control-plane simulator that such a kernel requires.
 
 ## Quick Start
 
-Create a virtual environment if you want one, then run:
-
 ```bash
+# Install in development mode
+pip install -e ".[dev]"
+
+# Run the demo
 python -m megakernel_lab.demo
-```
 
-Run tests with:
+# Run tests
+python -m pytest tests/ -v
 
-```bash
-python -m pytest
-```
-
-Run the benchmark harness with:
-
-```bash
+# Run benchmarks
 python -c "from megakernel_lab.bench import BenchmarkRunner; print(BenchmarkRunner().run())"
+
+# Or use Make targets
+make help
+make demo
+make test
+make bench
 ```
 
-## Why Start With a Simulator
+## Benchmark Example Output
 
-Before writing a giant CUDA kernel, we need to be precise about:
+```
+   batch_size  block_size  mean_ttft_ms  mean_itl_ms  acceptance_rate  kv_hit_rate  live_kv_bytes  pinned_kv_bytes  eviction_count  fragmentation_ratio
+0           1           1          0.75         0.25              1.0          0.0           320              256               0                  0.0
+1           1           2          0.75         0.25              1.0          0.0           320              256               0                  0.0
+2           4           1          0.75         0.25              1.0          0.0          1280             1024               0                  0.0
+3           4           4          0.75         0.25              1.0          0.0          1280             1024               0                  0.0
+4           8           1          0.75         0.25              1.0          0.0          2560             2048               0                  0.0
+5           8           4          0.75         0.25              1.0          0.0          2560             2048               0                  0.0
+```
 
-- which buffers are authoritative
-- when draft tokens become committed tokens
-- what state lives with the request vs the scheduler
-- what must remain on device in a real persistent kernel
+## Repository Structure
 
-That control flow is what this repo captures first.
+```
+src/megakernel_lab/
+    config.py           - Runtime configuration (block size, layers, KV dimensions)
+    state.py            - Request, worker, and backend state objects
+    runtime.py          - Persistent decode runtime with worker pool
+    kv_cache.py         - Paged KV-cache with LRU eviction, pinning, memory accounting
+    spec_decode.py      - Speculative block proposer and verifier
+    backend.py          - Abstract kernel backend + CPU stub
+    bench.py            - Benchmark harness with CSV export
+    demo.py             - Runnable demo comparing decode modes
+
+cuda/
+    persistent_decode_stub.cu  - Minimal CUDA persistent-kernel stub
+    request_desc.h             - Request descriptor struct for device
+    CMakeLists.txt             - Optional CUDA build
+
+tests/
+    test_runtime.py     - Runtime and worker tests
+    test_kv_cache.py    - KV cache allocation, eviction, memory accounting
+    test_spec_kv.py     - Speculative KV page lifecycle tests
+    test_bench.py       - Benchmark schema validation
+
+docs/
+    ARCHITECTURE.md     - Design intent and core concepts
+    CUDA_STAGING.md     - Host/device queue design document
+    ROADMAP.md          - Development phases
+```
+
+## Development
+
+```bash
+make install     # Install with dev dependencies
+make lint        # Run linters
+make format      # Auto-fix formatting
+make test        # Run test suite
+```
+
+## License
+
+Research use only. See LICENSE for details.
