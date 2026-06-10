@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diffusion-Style Token Refinement on a Persistent Mega-Kernel — XL-Persistent-Kernel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0C0C0D;
+    --surface: #141416;
+    --surface2: #1C1C1F;
+    --border: rgba(255,255,255,0.08);
+    --border-strong: rgba(255,255,255,0.15);
+    --green: #A8FF3E;
+    --green-dim: rgba(168,255,62,0.12);
+    --green-border: rgba(168,255,62,0.25);
+    --warning: #FFB347;
+    --text: #E8E8E6;
+    --text-muted: #888884;
+    --text-dim: #555552;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Inter', system-ui, sans-serif;
+    --max-w: 740px;
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .container {
+    max-width: var(--max-w);
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  /* ─── NAV ─────────────────────────────────────────────────── */
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    max-width: var(--max-w);
+    margin: 0 auto;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav-logo {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--text);
+    text-decoration: none;
+  }
+
+  .nav-logo:hover { color: var(--green); }
+
+  .nav-link {
+    font-size: 14px;
+    color: var(--text-muted);
+    text-decoration: none;
+  }
+
+  .nav-link:hover { color: var(--text); }
+
+  /* ─── HERO ────────────────────────────────────────────────── */
+  .hero {
+    padding: 80px 24px 60px;
+    text-align: center;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .hero-label {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--green);
+    border: 1px solid var(--green-border);
+    background: var(--green-dim);
+    padding: 4px 12px;
+    border-radius: 4px;
+    margin-bottom: 24px;
+  }
+
+  .hero h1 {
+    font-family: var(--mono);
+    font-size: clamp(24px, 5vw, 36px);
+    font-weight: 700;
+    line-height: 1.3;
+    margin-bottom: 16px;
+  }
+
+  .hero p {
+    font-size: 16px;
+    color: var(--text-muted);
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  .hero-meta {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 24px;
+  }
+
+  /* ─── SECTION ─────────────────────────────────────────────── */
+  .section {
+    padding: 48px 24px;
+    max-width: var(--max-w);
+    margin: 0 auto;
+  }
+
+  .section h2 {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+
+  .section h3 {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 600;
+    margin: 28px 0 12px;
+    color: var(--green);
+  }
+
+  .section p {
+    font-size: 15px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    line-height: 1.8;
+  }
+
+  /* ─── CALLOUT ─────────────────────────────────────────────── */
+  .callout {
+    background: var(--green-dim);
+    border: 1px solid var(--green-border);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 24px 0;
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+
+  .callout strong { color: var(--green); }
+
+  .callout-warning {
+    background: rgba(255,179,71,0.08);
+    border: 1px solid rgba(255,179,71,0.25);
+    border-radius: 6px;
+    padding: 20px 24px;
+    margin: 24px 0;
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+
+  .callout-warning strong { color: var(--warning); }
+
+  /* ─── CODE BLOCK ──────────────────────────────────────────── */
+  .code-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    margin: 20px 0;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    color: #D4D4D4;
+  }
+
+  .code-block .kw { color: #C586C0; }
+  .code-block .fn { color: #DCDCAA; }
+  .code-block .tp { color: #4EC9B0; }
+  .code-block .cm { color: #6A9955; }
+  .code-block .str { color: #CE9178; }
+  .code-block .num { color: #B5CEA8; }
+  .code-block .op { color: #D4D4D4; }
+
+  /* ─── TABLE ───────────────────────────────────────────────── */
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 14px;
+  }
+
+  .compare-table th {
+    font-family: var(--mono);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-strong);
+  }
+
+  .compare-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    vertical-align: top;
+  }
+
+  .compare-table td:first-child,
+  .compare-table th:first-child {
+    padding-left: 0;
+  }
+
+  .compare-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .compare-table code {
+    font-family: var(--mono);
+    font-size: 12px;
+    background: var(--surface);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+
+  /* ─── PULL QUOTE ──────────────────────────────────────────── */
+  .pull-quote {
+    border-left: 2px solid var(--green);
+    padding: 16px 24px;
+    margin: 24px 0;
+    font-size: 15px;
+    color: var(--text);
+    font-style: italic;
+  }
+
+  .pull-quote p { margin-bottom: 0; }
+
+  /* ─── STAGE CARD ──────────────────────────────────────────── */
+  .stage-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    margin: 16px 0;
+  }
+
+  .stage-card h4 {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--green);
+    margin-bottom: 8px;
+  }
+
+  .stage-card p {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-bottom: 0;
+  }
+
+  .stage-card .stage-sig {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    background: var(--surface2);
+    padding: 6px 10px;
+    border-radius: 4px;
+    margin-top: 8px;
+    display: inline-block;
+  }
+
+  /* ─── FOOTER ──────────────────────────────────────────────── */
+  .footer {
+    border-top: 1px solid var(--border);
+    padding: 40px 24px;
+    text-align: center;
+  }
+
+  .footer p {
+    font-size: 14px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+
+  .footer a {
+    color: var(--green);
+    text-decoration: none;
+  }
+
+  .footer a:hover { text-decoration: underline; }
+
+  hr.divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    max-width: var(--max-w);
+    margin: 0 auto;
+  }
+
+  @media (max-width: 600px) {
+    .hero { padding: 48px 16px 40px; }
+    .section { padding: 32px 16px; }
+    .code-block { font-size: 12px; padding: 14px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ─── NAV ─────────────────────────────────────────────────── -->
+<nav class="nav">
+  <a href="index.html" class="nav-logo">← XL-Persistent-Kernel</a>
+  <a href="https://github.com/manishklach/XL-Persistent-Kernel" class="nav-link" target="_blank">GitHub ↗</a>
+</nav>
+
+<!-- ─── HERO ────────────────────────────────────────────────── -->
+<div class="hero">
+  <div class="hero-label">Conceptual sketch</div>
+  <h1>Diffusion-Style Token Refinement<br>on a Persistent Mega-Kernel</h1>
+  <p>Mapping the parallel refinement pipeline of diffusion-based language models to a single GPU-resident control loop — same architectural pattern, different generation paradigm.</p>
+  <div class="hero-meta">Filed under cuda/examples/ · Built for systems discussion, not reproduction</div>
+</div>
+
+<!-- ─── INTRO ───────────────────────────────────────────────── -->
+<section class="section">
+  <h2>Why diffusion-style generation?</h2>
+
+  <p>
+    Autoregressive decoding dominates LLM serving today: generate one token at a time, left to right, each conditioned
+    on all previous tokens. But a parallel body of research explores <strong>diffusion-based language modeling</strong>,
+    where the model starts with a canvas of random tokens and iteratively refines them in parallel — denoising toward
+    a coherent sequence. This is the approach behind models like Diffusion-LM, SSD-LM, and Google's DiffusionGemma.
+  </p>
+
+  <p>
+    From a <strong>systems</strong> perspective, the difference is stark. Autoregressive generation is inherently
+    serial — one token per step, fixed compute per step. Diffusion-style generation is inherently parallel — the
+    entire canvas is processed in each refinement step. But the orchestration problem remains the same: do we
+    drive these steps from a host-side loop, launching a new kernel each time, or do we keep the control loop
+    on the GPU, eliminating round-trips?
+  </p>
+
+  <div class="pull-quote">
+    <p>
+      "The generation paradigm changes, but the orchestration bottleneck is identical. That makes diffusion-style
+      inference a natural second application for the persistent mega-kernel thesis."
+    </p>
+  </div>
+
+  <p>
+    This sketch (<code class="inline">cuda/examples/diffusion_refinement_megakernel_sketch.cu</code>) is a
+    <strong>conceptual mapping</strong> — not a working diffusion model, but a structural demonstration of how
+    a persistent mega-kernel adapts to a parallel refinement pipeline.
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- ─── THE SKETCH ──────────────────────────────────────────── -->
+<section class="section">
+  <h2>The resident refinement loop</h2>
+
+  <p>
+    The kernel follows the same pattern as the repo's main <code class="inline">xl_persistent_megakernel.cu</code>:
+    one thread block per request, a persistent <code class="inline">while</code> loop on device, and a shared
+    shutdown flag. But instead of a linear prefill → decode → verify pipeline, the stages are mapped to
+    diffusion-style refinement operations:
+  </p>
+
+  <pre class="code-block"><span class="kw">while</span> (!(*shutdown) && !r->done) {
+    denoise_canvas_step(r, canvas);
+    update_confidence_mask(r, canvas);
+    verify_or_resample(r, canvas);
+    commit_ready_tokens(r, canvas);
+    update_resident_state(r, state);
+
+    <span class="kw">if</span> (r->step >= r->max_steps || r->stable_tokens >= r->canvas_len)
+        r->done = 1;
+
+    __syncthreads();
+
+    <span class="kw">if</span> (idx == 0 && all_done(reqs, num_reqs))
+        *shutdown = 1;
+}</pre>
+
+  <p>Each stage is a separate device helper with deterministic fake math — the logic is a placeholder, but the
+  <strong>control flow</strong> is the point.</p>
+</section>
+
+<hr class="divider">
+
+<!-- ─── STAGE BREAKDOWN ─────────────────────────────────────── -->
+<section class="section">
+  <h2>Stage by stage</h2>
+  <p>Five stages in each refinement step, each mapped to a device function. The naming convention mirrors the
+  diffusion literature while the structure mirrors the repo's existing mega-kernel pattern.</p>
+
+  <div class="stage-card">
+    <h4>1. denoise_canvas_step</h4>
+    <p>Incrementally updates every token on the canvas toward a less-noisy state. In a real implementation this would
+    invoke a diffusion model forward pass over the entire canvas. Here, each token is deterministically perturbed by
+    <code class="inline">(token + request_id + step) % 32000</code> — a no-op placeholder that preserves the loop
+    structure.</p>
+    <div class="stage-sig">denoise_canvas_step(DiffusionRequest* r, Canvas* c)</div>
+  </div>
+
+  <div class="stage-card">
+    <h4>2. update_confidence_mask</h4>
+    <p>Assigns a confidence score to each canvas position. In a diffusion pipeline, confidence corresponds to how
+    close a token is to its final predicted value — low-confidence positions may need more refinement steps. Here,
+    confidence is a simple linear ramp: <code class="inline">step / max_steps</code>, capped at 0.99 beyond 95%
+    progress.</p>
+    <div class="stage-sig">update_confidence_mask(DiffusionRequest* r, Canvas* c)</div>
+  </div>
+
+  <div class="stage-card">
+    <h4>3. verify_or_resample</h4>
+    <p>Positions whose confidence is below 0.5 are resampled with a deterministic pseudorandom function. This mirrors
+    the diffusion process where low-confidence tokens are re-predicted by the model. In a speculative-decoding context,
+    this stage is analogous to rejection sampling against a draft proposal.</p>
+    <div class="stage-sig">verify_or_resample(DiffusionRequest* r, Canvas* c)</div>
+  </div>
+
+  <div class="stage-card">
+    <h4>4. commit_ready_tokens</h4>
+    <p>Tokens with confidence above 0.9 are counted as stable/committed. This is the diffusion equivalent of committing
+    accepted speculation tokens to the KV cache. When the number of stable tokens equals the full canvas length,
+    the request is done.</p>
+    <div class="stage-sig">commit_ready_tokens(DiffusionRequest* r, Canvas* c)</div>
+  </div>
+
+  <div class="stage-card">
+    <h4>5. update_resident_state</h4>
+    <p>Persists the current step number to the GPU-resident metadata array — matching the
+    <code class="inline">update_resident_state</code> pattern from the autoregressive kernel. This state is
+    available for host inspection or multi-GPU coordination without additional kernel launches.</p>
+    <div class="stage-sig">update_resident_state(DiffusionRequest* r, ResidentState* s)</div>
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ─── COMPARISON TABLE ────────────────────────────────────── -->
+<section class="section">
+  <h2>Autoregressive vs. diffusion mapping</h2>
+  <p>The structural symmetry between the two generation paradigms is visible when you compare their stage pipelines:</p>
+
+  <table class="compare-table">
+    <thead>
+      <tr>
+        <th>Autoregressive (main kernel)</th>
+        <th>Diffusion (this sketch)</th>
+        <th>Role</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>prefill</code></td>
+        <td><code>denoise</code></td>
+        <td>Generate or refine the next state of the sequence</td>
+      </tr>
+      <tr>
+        <td><code>decode</code></td>
+        <td><code>update_confidence</code></td>
+        <td>Evaluate current state quality</td>
+      </tr>
+      <tr>
+        <td><code>spec_verify</code></td>
+        <td><code>verify_or_resample</code></td>
+        <td>Accept, reject, or re-predict low-quality positions</td>
+      </tr>
+      <tr>
+        <td><code>commit</code></td>
+        <td><code>commit_ready_tokens</code></td>
+        <td>Mark positions as finalized</td>
+      </tr>
+      <tr>
+        <td><code>kv state update</code></td>
+        <td><code>update_resident_state</code></td>
+        <td>Persist request-level metadata on device</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    The pipeline shapes differ — autoregressive stages are serial (one token at a time), diffusion stages are
+    parallel (the whole canvas) — but the resident loop architecture is identical. Same shutdown protocol,
+    same block-per-request pattern, same elimination of CPU round-trips between stages.
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- ─── CODE WALKTHROUGH ────────────────────────────────────── -->
+<section class="section">
+  <h2>Key design elements</h2>
+
+  <h3>Block-per-request topology</h3>
+  <p>
+    Each thread block claims one <code class="inline">DiffusionRequest</code> and its associated
+    <code class="inline">Canvas</code>. This matches the autoregressive kernel's block-per-request layout
+    exactly. The total number of blocks equals the batch size, and each block loops until its request
+    reaches <code class="inline">max_steps</code> or the entire canvas is stable.
+  </p>
+
+  <h3>Resident shutdown with block-0 responsibility</h3>
+  <p>
+    Block 0 checks <code class="inline">all_done()</code> after every iteration and sets the shared
+    <code class="inline">shutdown</code> flag. This is the same pattern used in
+    <code class="inline">xl_persistent_megakernel.cu</code> — one clean coordination primitive, no
+    host-side polling, no atomic arbitration across blocks.
+  </p>
+
+  <div class="callout">
+    <strong>128:1 reduction.</strong> If a diffusion refinement takes 128 steps and each step is launched
+    separately from the host, that's 128 kernel launches and 128 host-device synchronizations. With the
+    persistent mega-kernel, it's one launch and one synchronization — regardless of step count.
+    The orchestration savings grow with the number of refinement steps.
+  </div>
+
+  <h3>Fake math by design</h3>
+  <p>
+    All arithmetic is deterministic and stateless — no random number generation, no model weights, no
+    attention mechanism. The point is to demonstrate the <strong>control flow scaffold</strong> at zero
+    implementation cost. A real diffusion model would plug real math into each stage without changing
+    the loop structure, the shutdown protocol, or the block topology.
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- ─── DISCLAIMER ──────────────────────────────────────────── -->
+<section class="section">
+  <div class="callout-warning">
+    <strong>What this is not.</strong><br><br>
+    This file is <strong>not</strong> an implementation of DiffusionGemma.<br>
+    This file is <strong>not</strong> compatible with Google's DiffusionGemma implementation.<br>
+    This file is <strong>not</strong> a working diffusion language model.<br><br>
+    It is a <strong>systems-level mapping sketch</strong> — a conceptual demonstration of how the persistent
+    mega-kernel pattern (one resident GPU loop, many logical stages) applies to diffusion-style parallel
+    token refinement. All math is fake. The purpose is structural comparison and architectural discussion.
+  </div>
+</section>
+
+<hr class="divider">
+
+<!-- ─── COMMON THESIS ───────────────────────────────────────── -->
+<section class="section">
+  <h2>The common thesis</h2>
+
+  <p>
+    Whether generation is autoregressive (one token at a time) or diffusion-based (refine the whole canvas in
+    parallel), the orchestration problem is the same: how many host round-trips does your inference pipeline
+    require per request, and can you eliminate them?
+  </p>
+
+  <p>
+    The persistent mega-kernel says: <strong>move the control loop to the GPU</strong>. Keep the device
+    resident with a persistent while-loop, sequence stages as inline device functions, and communicate
+    coordination state (done flags, shutdown) through device-visible memory. The host launches once and
+    synchronizes once — regardless of how many stages or steps the pipeline requires.
+  </p>
+
+  <div class="pull-quote">
+    <p>
+      "The generation paradigm changes. The orchestration savings do not."
+    </p>
+  </div>
+
+  <p>
+    This is the core insight that makes the sketch worth reading alongside the main repo. The autoregressive
+    and diffusion mappings are two faces of the same architectural decision: keep the loop on device,
+    and let the host return to doing what it does best — scheduling, memory management, and high-level
+    coordination — rather than micro-managing every step of generation.
+  </p>
+</section>
+
+<hr class="divider">
+
+<!-- ─── FOOTER ──────────────────────────────────────────────── -->
+<footer class="footer">
+  <p>
+    <strong>XL-Persistent-Kernel</strong> — exploring GPU-resident control loops for LLM serving.<br>
+    <a href="index.html">← Back to the main blog</a>
+  </p>
+</footer>
+
+</body>
+</html>
