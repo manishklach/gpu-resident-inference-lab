@@ -264,6 +264,53 @@ make cuda-smoke     # Builds and runs xlpk_cuda_smoke (tests both paths)
 
 Without CUDA, this target prints a friendly message and skips. See [docs/CUDA_STAGING.md](docs/CUDA_STAGING.md) for the full design document.
 
+## Measurement: Host-Launched Decode vs Persistent Mega-Kernel
+
+The CUDA measurement harness (`xlpk_cuda_smoke`) compares two execution-control paths. It does **not** measure transformer math — the math remains fake/deterministic. It measures **orchestration overhead**: host kernel launches, host synchronizations, and elapsed time for the control-flow scaffold.
+
+### What the Numbers Show
+
+| Path | Host launches | Host syncs | Control owner |
+|------|--------------|------------|---------------|
+| Baseline host-launched | O(tokens) | O(tokens) | CPU |
+| Persistent mega-kernel | 1 | 1 | GPU |
+
+The baseline path launches a kernel for every decode step. The mega-kernel launches once and the GPU advances requests internally.
+
+### Commands
+
+```bash
+# Quick smoke test (4 requests, 8 tokens each)
+make cuda-smoke
+
+# Measurement run (8 requests, 128 tokens each, CSV output)
+make cuda-bench
+
+# Larger run (32 requests, 512 tokens each)
+make cuda-bench-large
+
+# Summarize results
+python scripts/summarize_cuda_results.py build/cuda/cuda_results.csv
+```
+
+### Example Output
+
+```
+Baseline host-launched decode:
+  host_kernel_launches: 128
+  host_synchronizations: 128
+
+Persistent mega-kernel:
+  host_kernel_launches: 1
+  host_synchronizations: 1
+
+Relative:
+  launch_reduction: 128:1
+  sync_reduction: 128:1
+```
+
+**Important:** This is not claiming real 1T inference performance. This demonstrates the execution-control advantage that a real 1T-class serving system would need when combined with MoE, sparsity, quantization, paged KV cache, speculative decoding, continuous batching, and multi-GPU communication overlap.
+
 ## Development
 
 ```bash

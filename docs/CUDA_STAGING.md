@@ -300,6 +300,67 @@ Without nvcc, the target prints a skip message and succeeds.
 
 ---
 
+## Measured Control-Plane Difference
+
+The measurement harness in `host_launcher.cpp` (`xlpk_cuda_smoke`) quantifies the orchestration gap between two execution-control models:
+
+### 1. Baseline Host-Launched Path
+
+```
+CPU owns the token loop.
+for each iteration:
+    launch baseline_host_decode_step_kernel   // host_kernel_launches++
+    synchronize                                // host_synchronizations++
+    copy request descriptors back
+CPU advances one decode step per launch.
+```
+
+### 2. Persistent Mega-Kernel Path
+
+```
+CPU launches once.
+GPU owns the token loop.
+xl_persistent_megakernel<<<N, block>>>(...)
+synchronize once at end.                     // host_synchronizations = 1
+CPU copies descriptors back.
+```
+
+### Comparison Table
+
+| Path | Host launches | Host syncs | Control owner |
+|------|--------------|------------|---------------|
+| Baseline | O(tokens) | O(tokens) | CPU |
+| Mega-kernel | 1 | 1 | GPU |
+
+### What This Measures
+
+The current CUDA code does not measure transformer math (the math is fake). It measures:
+
+- **Host kernel launch count** — each baseline launch incurs ~5–10 µs overhead
+- **Host synchronization count** — each sync incurs latency and memory fence costs
+- **Elapsed wall time** — total time for the control-flow scaffold to complete
+- **Tokens per second** — throughput through the deterministic stub
+
+### Expected Results
+
+```
+Baseline host-launched decode:
+  host_kernel_launches: 128
+  host_synchronizations: 128
+
+Persistent mega-kernel:
+  host_kernel_launches: 1
+  host_synchronizations: 1
+
+Relative:
+  launch_reduction: 128:1
+  sync_reduction: 128:1
+```
+
+**Key insight:** The first measurable win is not model quality or FLOPs. It is reduced orchestration overhead and less fragmented GPU execution. A real 1T-class serving system would build on this pattern, combined with MoE, quantization, paged KV cache, speculative decoding, continuous batching, and multi-GPU communication overlap.
+
+---
+
 ## What Is Intentionally Fake Today
 
 - **No real transformer math**: All token generation is `(last_token + 1 + request_id) % 32000`.
@@ -316,7 +377,8 @@ Without nvcc, the target prints a skip message and succeeds.
 
 ## Future Real Implementation Path
 
-- **Phase 2B**: Measured launch-overhead comparison using CUDA events, launch count, NVTX ranges.
+- **Phase 2B**: Measured orchestration overhead (CUDA event timing, launch/sync counters, CSV export, make cuda-bench) — **in progress**.
+- **Phase 2C**: NVTX / profiler visibility (NVTX ranges around baseline loop and mega-kernel launch, Nsight Systems trace documentation) — **planned**.
 - **Phase 3**: Real fused decode/verify path with real attention, projection, sampling, KV tensors, block verification, continuous batching.
 - **Phase 4**: Dynamic request admission via device queues, continuous batching.
 - **Phase 5**: Multi-GPU tensor parallelism, NVLink communication overlap.

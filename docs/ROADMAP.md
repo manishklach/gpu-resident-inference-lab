@@ -35,17 +35,34 @@ The fused persistent mega-kernel as a device-side control-flow scaffold. No real
 
 **Key principle:** Many logical inference stages, one persistent mega-kernel.
 
-## Phase 2B: Measured Launch-Overhead Comparison
+## Phase 2B: Measured Orchestration Overhead
+
+**Status: In progress**
+
+Instrument the measurement harness to quantify the execution-control difference between host-launched decode and the persistent mega-kernel.
+
+- CUDA event timing (elapsed_ms for each path)
+- Host launch count (baseline: O(tokens), mega-kernel: 1)
+- Host synchronization count (baseline: O(tokens), mega-kernel: 1)
+- CSV export with RunMetrics columns
+- Repeatable `make cuda-bench` and `make cuda-bench-large` targets
+- `scripts/summarize_cuda_results.py` for compact summary + optional chart
+- CLI flags: `--mode`, `--requests`, `--tokens`, `--draft-len`, `--csv`
+- README measurement section comparing both paths
+
+**Key insight:** The first measurable win is not model quality or FLOPs. It is reduced orchestration overhead and less fragmented GPU execution.
+
+## Phase 2C: NVTX / Profiler Visibility
 
 **Planned**
 
-Instrument the smoke test to measure the overhead the mega-kernel eliminates.
+Add NVTX annotations for profiler-based visualization of the control-flow difference.
 
-- CUDA events for wall-time measurement
-- Launch count comparison (N vs 1)
-- Baseline repeated launch overhead vs one mega-kernel launch
-- Optional NVTX range annotations
-- Document the dispatch/synchronization cost ratio
+- NVTX ranges around baseline loop (`baseline_host_decode_loop`)
+- NVTX range around mega-kernel launch (`persistent_megakernel`)
+- Guard with `#ifdef XLPK_ENABLE_NVTX` so builds without NVTX still work
+- Optional Nsight Systems instructions in docs
+- Document expected trace shape: many small ranges (baseline) vs one large range (mega-kernel)
 
 ## Phase 3: Real Fused Decode/Verify Kernels
 

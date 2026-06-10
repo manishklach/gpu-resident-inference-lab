@@ -1,3 +1,34 @@
+/**
+ * xl_persistent_megakernel.cu — Fused persistent mega-kernel.
+ *
+ * Role:
+ *   One resident GPU kernel launch. The GPU advances the request lifecycle
+ *   internally without returning control to the host. All pipeline stages
+ *   are device-side inline helpers called from this kernel's loop.
+ *
+ * Key design:
+ *   - Host launches this kernel once (host_kernel_launches = 1).
+ *   - Host synchronizes once at completion (host_synchronizations = 1).
+ *   - GPU owns the token loop: prefill → decode → verify → commit → repeat.
+ *
+ * Current status:
+ *   - All math is fake/deterministic (control-flow scaffold only).
+ *   - No real transformer attention, projection, or sampling.
+ *   - The measurement target is orchestration overhead, not model FLOPs.
+ *
+ * Future:
+ *   - Real fused inference pipeline with real attention/decode kernels,
+ *     KV tensors, and speculative verification.
+ *
+ * @param requests        Array of request descriptors (device memory)
+ * @param num_requests    Number of request descriptors
+ * @param kv_table        KV page table with device-side page entries
+ * @param draft_tokens    Shared draft token buffer (device memory)
+ * @param shutdown_flag   Host/device flag; kernel exits when set
+ * @param max_iterations  Safety bound on the internal loop
+ * @param block_size      Speculative block size for draft proposal
+ */
+
 #include <cuda_runtime.h>
 #include "request_desc.h"
 #include "kv_page_table.h"
@@ -19,9 +50,8 @@ __global__ void xl_persistent_megakernel(
     if (blockIdx.x >= num_requests) return;
 
     RequestDescriptor* req = &requests[blockIdx.x];
-    int iteration = 0;
 
-    while (!(*shutdown_flag) && iteration < max_iterations) {
+    for (int iteration = 0; !(*shutdown_flag) && iteration < max_iterations; iteration++) {
         if (!req->is_done()) {
             stage_prefill(req, &kv_table);
             stage_decode(req, draft_tokens, block_size);
@@ -32,15 +62,11 @@ __global__ void xl_persistent_megakernel(
         if (blockIdx.x == 0 && threadIdx.x == 0) {
             bool all_done = true;
             for (int i = 0; i < num_requests; i++) {
-                if (!requests[i].is_done()) {
-                    all_done = false;
-                    break;
-                }
+                if (!requests[i].is_done()) { all_done = false; break; }
             }
             if (all_done) *shutdown_flag = 1;
         }
 
-        iteration++;
         __syncthreads();
     }
 }

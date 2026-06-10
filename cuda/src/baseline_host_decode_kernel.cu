@@ -1,13 +1,23 @@
 /**
- * baseline_host_decode_kernel.cu - Baseline comparison kernel.
+ * baseline_host_decode_kernel.cu — Baseline comparison kernel.
  *
- * This kernel represents the conventional host-launched decode model:
- * - Host controls the loop
- * - GPU performs a single decode step per launch
- * - Host synchronizes after every token
+ * Role:
+ *   Conventional host-driven decode. The CPU controls the token loop:
+ *   launch once per step, synchronize after each step, inspect results
+ *   on the host, repeat. One host kernel launch = one decode step.
  *
  * This exists ONLY for comparison against the persistent mega-kernel.
  * The whole point of XL-Persistent-Kernel is to eliminate this pattern.
+ *
+ * Key design:
+ *   - Host launches repeatedly (host_kernel_launches = O(tokens)).
+ *   - Host synchronizes after every launch (host_synchronizations = O(tokens)).
+ *   - CPU owns the token loop.
+ *   - Intentionally shows the orchestration overhead the mega-kernel avoids.
+ *
+ * Current status:
+ *   - One step per launch. No speculative decode. No device-resident loop.
+ *   - Intentionally the anti-pattern / baseline.
  *
  * Launch pattern:
  *   for each iteration:
