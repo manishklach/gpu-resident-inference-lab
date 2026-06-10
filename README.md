@@ -283,6 +283,8 @@ while (!*shutdown && !r->done) {
 
 > **This sketch is not an implementation of DiffusionGemma. It is a systems-level mapping of the persistent mega-kernel idea to diffusion-style token refinement. All math is fake/deterministic.**
 
+📖 [**Full blog post: Diffusion-Style Token Refinement on a Persistent Mega-Kernel**](https://manishklach.github.io/XL-Persistent-Kernel/diffusion-sketch.html) — stage-by-stage breakdown, autoregressive comparison table, and design rationale.
+
 ## Measurement: Host-Launched Decode vs Persistent Mega-Kernel
 
 The CUDA measurement harness (`xlpk_cuda_smoke`) compares two execution-control paths. It does **not** measure transformer math — the math remains fake/deterministic. It measures **orchestration overhead**: host kernel launches, host synchronizations, and elapsed time for the control-flow scaffold.
