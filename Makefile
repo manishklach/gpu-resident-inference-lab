@@ -13,7 +13,7 @@
 #   make cuda-bench-large - Larger CUDA measurement run
 #   make clean        - Remove build artifacts
 
-.PHONY: install test lint format bench demo compare cuda-stub cuda-smoke cuda-bench cuda-bench-large clean help
+.PHONY: install test lint format bench demo compare check-claims cuda-stub cuda-smoke cuda-bench cuda-bench-large clean help
 
 # Default target
 help:
@@ -24,6 +24,7 @@ help:
 	@echo "  format      - Auto-fix with ruff and black"
 	@echo "  bench       - Run benchmark harness"
 	@echo "  demo        - Run demo script"
+	@echo "  check-claims - Scan docs for overclaiming phrases (advisory)"
 	@echo "  compare     - Run Python bench + CUDA sweep and compare side-by-side"
 	@echo "  cuda-smoke  - Build and run CUDA staging smoke tests (requires nvcc)"
 	@echo "  cuda-bench  - Build and run CUDA measurement sweep (requires nvcc)"
@@ -81,6 +82,10 @@ compare:
 	   echo "Python CSV: $$PY_CSV"; \
 	   echo "Install the CUDA toolkit to include CUDA measurements."; \
 	 fi
+
+check-claims:
+	@python scripts/check_claims.py docs/ README.md; \
+	 echo "  (advisory — does not block CI)"
 
 cuda-stub:
 	@echo "The legacy persistent_decode_stub has been replaced by the mega-kernel smoke test."

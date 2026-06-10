@@ -44,11 +44,13 @@ Instrument the measurement harness to quantify the execution-control difference 
 - CUDA event timing (elapsed_ms for each path)
 - Host launch count (baseline: O(tokens), mega-kernel: 1)
 - Host synchronization count (baseline: O(tokens), mega-kernel: 1)
-- CSV export with RunMetrics columns
+- CSV export with RunMetrics columns: launch_reduction, sync_reduction, speedup_vs_baseline
+- `--mode sweep` Cartesian product over requests × tokens × draft_len
 - Repeatable `make cuda-bench` and `make cuda-bench-large` targets
 - `scripts/summarize_cuda_results.py` for compact summary + optional chart
-- CLI flags: `--mode`, `--requests`, `--tokens`, `--draft-len`, `--csv`
-- README measurement section comparing both paths
+- `scripts/compare_metrics.py` for Python-CUDA side-by-side
+- `make compare` target for unified comparison
+- README and blog measurement sections
 
 **Key insight:** The first measurable win is not model quality or FLOPs. It is reduced orchestration overhead and less fragmented GPU execution.
 
@@ -61,8 +63,9 @@ Add NVTX annotations for profiler-based visualization of the control-flow differ
 - NVTX ranges around baseline loop (`baseline_host_decode_loop`)
 - NVTX range around mega-kernel launch (`persistent_megakernel`)
 - Guard with `#ifdef XLPK_ENABLE_NVTX` so builds without NVTX still work
-- Optional Nsight Systems instructions in docs
+- Nsight Systems instructions in docs
 - Document expected trace shape: many small ranges (baseline) vs one large range (mega-kernel)
+- Profiler-backed latency analysis to complement CUDA event timing
 
 ## Phase 3: Real Fused Decode/Verify Kernels
 

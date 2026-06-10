@@ -5,11 +5,13 @@
 [![License: Research](https://img.shields.io/badge/license-Research%20Use-yellow)](LICENSE)
 [![Blog](https://img.shields.io/badge/GitHub%20Pages-blog-green)](https://manishklach.github.io/XL-Persistent-Kernel/)
 
-**CPU-first control-plane simulator and CUDA staging ground for persistent-kernel LLM decode.** · [Read the blog](https://manishklach.github.io/XL-Persistent-Kernel/)
+**XL-Persistent-Kernel explores a persistent GPU mega-kernel execution model for LLM serving.** The goal is to move the decode-serving control loop from CPU-orchestrated kernel launches into one GPU-resident execution loop. Prefill, decode, speculative verification, commit, and KV lifecycle management are modeled as logical stages inside one persistent kernel. · [Read the blog](https://manishklach.github.io/XL-Persistent-Kernel/)
 
 This repository is not a production inference stack. It is a research scaffold for building the control flow, scheduling, and memory-management infrastructure that a persistent CUDA decode kernel will eventually need.
 
 The simulator runs entirely on CPU today, but it is structured so that every abstractions (backend, KV-cache, request descriptors) can be swapped for real device implementations without rewriting the runtime.
+
+**Important: The current implementation uses fake deterministic math. It is a control-flow and lifecycle scaffold, not a production transformer runtime.**
 
 ## Architecture
 
@@ -97,6 +99,10 @@ For 1T-class models, especially sparse/MoE systems, throughput is limited not on
 | `stage_scheduler` | Device-side request picker | Linear scan + priority | GPU-resident scheduler |
 | `baseline_host_decode_kernel` | Comparison baseline | One step per host launch | Performance baseline |
 
+## What This Measures Today
+
+The current CUDA scaffold does not measure real transformer math, model quality, or production LLM throughput. It measures orchestration structure: host launch count, host synchronization count, request lifecycle progress, and the difference between a CPU-driven token loop and one GPU-resident mega-kernel launch.
+
 ## What Is Implemented Today
 
 - **Runtime simulator** with specialized prefill and decode workers
@@ -122,31 +128,11 @@ For 1T-class models, especially sparse/MoE systems, throughput is limited not on
 
 These are planned phases (see [docs/ROADMAP.md](docs/ROADMAP.md)).
 
-## Why Persistent Kernels Matter
+## Many Logical Stages, One Resident Kernel
 
-Traditional LLM decode launches one kernel per token per request:
+XL-Persistent-Kernel is not a bag of independent CUDA kernels. The opposite is the point. The repo models prefill, decode, speculative verification, commit, and KV lifecycle management as logical stages inside one persistent GPU mega-kernel. The stage helper files exist for readability, but the execution model is one resident kernel that keeps request state and control flow on the GPU.
 
-```
-Host: launch attention kernel -> wait -> launch projection -> wait -> sample -> wait -> repeat
-```
-
-Each launch incurs host-device synchronization, kernel launch overhead, and memory fence costs. For small batch sizes, this dominates runtime.
-
-A persistent kernel keeps one long-lived GPU loop running:
-
-```
-Device: loop {
-  read request descriptor from global memory
-  load KV pages
-  run attention + projection + sample
-  write new token and update decode position
-  if done, write completion status
-}
-```
-
-The kernel never returns to the host until all requests complete. The host only manages request admission, KV page allocation, and completion callbacks.
-
-This is the execution model behind production systems like vLLM's persistent batch, Xiaomi's Mirage/TileRT, and SGLang's RadixAttention. This repository builds the control-plane simulator that such a kernel requires.
+This repo is not trying to build many independent CUDA kernels. It is trying to show how many logical serving stages can be fused into one resident GPU mega-kernel.
 
 ## Quick Start
 

@@ -532,15 +532,19 @@
     in large language model serving — from CPU state machine to CUDA scaffold.
   </p>
 
-  <div class="hero-meta">
-    <div class="hero-meta-item">∿ <span>GPU Systems</span></div>
-    <div class="hero-meta-item">⌁ <span>LLM Inference</span></div>
-    <div class="hero-meta-item"># <span>Speculative Decode</span></div>
-    <a href="https://github.com/manishklach/XL-Persistent-Kernel" class="hero-link" target="_blank">
-      ↗ View on GitHub
-    </a>
-  </div>
-</header>
+    <div class="hero-meta">
+      <div class="hero-meta-item">∿ <span>GPU Systems</span></div>
+      <div class="hero-meta-item">⌁ <span>LLM Inference</span></div>
+      <div class="hero-meta-item"># <span>Speculative Decode</span></div>
+      <a href="https://github.com/manishklach/XL-Persistent-Kernel" class="hero-link" target="_blank">
+        ↗ View on GitHub
+      </a>
+    </div>
+    <div style="margin-top: 0.75rem; position: relative; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+      <span style="font-family: var(--mono); font-size: 11px; color: var(--text-dim);">Code:</span>
+      <a href="https://github.com/manishklach/XL-Persistent-Kernel" style="font-family: var(--mono); font-size: 12px; color: var(--green); text-decoration: none; border: 1px solid var(--green-border); padding: 4px 10px; border-radius: 3px;" target="_blank">github.com/manishklach/XL-Persistent-Kernel</a>
+    </div>
+  </header>
 
 
 <!-- ═══════════════════════════════════════════ CONTENT -->
@@ -554,7 +558,7 @@
     <p>
       Every token a large language model generates costs two things: the compute to actually run the transformer, and the
       <strong>orchestration overhead</strong> to ask it to do so. At small batch sizes — the regime that matters most for
-      interactive inference — the second term can dwarf the first.
+      interactive inference — orchestration overhead can become a first-order latency term.
     </p>
 
     <p>
@@ -584,8 +588,9 @@
     </p>
 
     <div class="callout">
-      <strong>Key insight:</strong> For small-batch inference, launch overhead can account for 30–60% of total decode
-      time. The GPU is fast. The decision loop around it is not.
+      <strong>Key insight:</strong> In some serving configurations, launch and synchronization overhead becomes large
+      enough to affect p50 and p99 latency, especially for small-batch decode. The GPU is fast. The decision loop
+      around it is not.
     </div>
   </section>
 
@@ -640,39 +645,58 @@ xl_persistent_megakernel&lt;&lt;&lt;N, block&gt;&gt;&gt;(
       <code class="inline">O(tokens)</code> launches to <strong>exactly one</strong>.
     </p>
 
+    <h3>Architecture flow</h3>
+
+    <div class="code-block">
+      <div class="code-block-header">
+        <span class="code-block-title">request flow: host → GPU mega-kernel → completion</span>
+        <span class="code-block-lang">diagram</span>
+      </div>
+      <pre><code>CPU request submit
+        ↓
+Request descriptors (device memory)
+        ↓
+Persistent GPU mega-kernel
+        ↓
+  ┌─────────────────────────────────┐
+  │  stage_prefill()   inline       │
+  │  stage_decode()    inline       │
+  │  stage_spec_verify() inline     │
+  │  stage_commit()    inline       │
+  │  stage_kv()        inline       │
+  └─────────────────────────────────┘
+        ↓
+Completion queue (device memory)
+        ↓
+CPU polls completion</code></pre>
+    </div>
+
+    <h3>Execution model comparison</h3>
+
     <table class="compare-table">
       <thead>
         <tr>
-          <th>Metric</th>
-          <th>Baseline (host-launched)</th>
-          <th>Persistent mega-kernel</th>
+          <th>Path</th>
+          <th>Host launches</th>
+          <th>Host syncs</th>
+          <th>Control owner</th>
+          <th>Execution model</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td>Kernel launches</td>
-          <td class="bad">O(tokens) — hundreds</td>
-          <td class="good">1</td>
-        </tr>
-        <tr>
-          <td>Host synchronizations</td>
+          <td>Baseline decode</td>
           <td class="bad">O(tokens)</td>
-          <td class="good">1</td>
-        </tr>
-        <tr>
-          <td>PCIe round-trips during decode</td>
-          <td class="bad">Every token</td>
-          <td class="good">Zero</td>
-        </tr>
-        <tr>
-          <td>Control owner</td>
+          <td class="bad">O(tokens)</td>
           <td>CPU</td>
-          <td class="good">GPU</td>
+          <td class="bad">Repeated kernel launches</td>
         </tr>
         <tr>
-          <td>GPU idle time (orchestration)</td>
-          <td class="bad">~5–10 µs per token</td>
-          <td class="good">Near zero</td>
+          <td>Persistent mega-kernel</td>
+          <td class="good">1</td>
+          <td class="good">1 (final)</td>
+          <td class="good">GPU</td>
+          <td class="good">Resident control loop</td>
         </tr>
       </tbody>
     </table>
@@ -690,6 +714,14 @@ xl_persistent_megakernel&lt;&lt;&lt;N, block&gt;&gt;&gt;(
       <strong>control-flow skeleton</strong> precisely. Get the state machine right. Know exactly which buffers are
       authoritative, when draft tokens become committed tokens, and what must remain on-device in a real persistent kernel.
     </p>
+
+    <div class="callout">
+      <strong>Many logical stages, one resident kernel.</strong> XL-Persistent-Kernel is not a bag of independent
+      CUDA kernels. The opposite is the point. The repo models prefill, decode, speculative verification, commit,
+      and KV lifecycle management as logical stages inside one persistent GPU mega-kernel. The stage helper files
+      exist for readability, but the execution model is one resident kernel that keeps request state and control
+      flow on the GPU.
+    </div>
 
     <p>
       The repo is organized in two layers that mirror how the final system will be built:
@@ -762,6 +794,13 @@ xl_persistent_megakernel&lt;&lt;&lt;N, block&gt;&gt;&gt;(
       Every state transition that the Python simulator validated is mirrored exactly at the CUDA level.
     </p>
 
+    <div class="callout">
+      <strong>Measurement note:</strong> The current CUDA scaffold does not measure real transformer math, model
+      quality, or production LLM throughput. It measures orchestration structure: host launch count, host
+      synchronization count, request lifecycle progress, and the difference between a CPU-driven token loop
+      and one GPU-resident mega-kernel launch. All token generation uses fake deterministic math.
+    </div>
+
     <h3>Measurement harness</h3>
 
     <p>
@@ -779,6 +818,45 @@ xl_persistent_megakernel&lt;&lt;&lt;N, block&gt;&gt;&gt;(
       Mega-kernel: host_kernel_launches = 1 &nbsp;|&nbsp; host_synchronizations = 1<br><br>
       The first measurable win is not model FLOPs. It's the 128:1 reduction in orchestration overhead.
     </div>
+
+    <h3>What is real today vs. future</h3>
+
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Today</th>
+          <th>Future</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Python simulator</td>
+          <td>Lifecycle correctness model</td>
+          <td>Scheduling experiments</td>
+        </tr>
+        <tr>
+          <td>CUDA mega-kernel</td>
+          <td>Fake deterministic control flow</td>
+          <td>Real fused inference path</td>
+        </tr>
+        <tr>
+          <td>Stage helpers</td>
+          <td>Inline logical stages</td>
+          <td>Real prefill/decode/verify logic</td>
+        </tr>
+        <tr>
+          <td>KV metadata</td>
+          <td>Fake page lifecycle</td>
+          <td>Real KV tensors and movement</td>
+        </tr>
+        <tr>
+          <td>CUDA measurement</td>
+          <td>Launch/sync counts</td>
+          <td>Profiler-backed latency analysis</td>
+        </tr>
+      </tbody>
+    </table>
   </section>
 
   <hr class="divider">
@@ -899,19 +977,18 @@ xl_persistent_megakernel&lt;&lt;&lt;N, block&gt;&gt;&gt;(
     <h2>Context: the 1T-class serving problem</h2>
 
     <p>
-      Trillion-parameter models — dense or MoE — face a compounding serving challenge. The arithmetic ceiling is
-      large, but the orchestration ceiling is often hit first. Token-by-token launch overhead, fragmented decode
-      stages, KV-cache pressure, speculative verification latency, and inter-GPU communication overhead all
-      interact. A persistent mega-kernel addresses the orchestration layer specifically; it is one component
-      in a larger stack alongside quantization, paged KV caching, continuous batching, and multi-GPU parallelism.
+      For 1T-class models, especially sparse or MoE systems, throughput is not limited only by FLOPs. It is also
+      limited by orchestration: token-by-token launch overhead, fragmented decode stages, KV-cache residency,
+      inter-GPU communication, and speculative verification/commit overhead. A persistent mega-kernel is one
+      execution-control technique for pushing these systems toward 1K+ tokens/sec when combined with MoE,
+      quantization, speculative decoding, paged KV cache, continuous batching, and multi-GPU communication overlap.
     </p>
 
     <p>
-      The projects this repo draws on — <strong>Mirage/MPK</strong> (which reported 1.2× to 6.7× latency
-      reduction in their OSDI '25 paper) and <strong>TileRT</strong> — demonstrate that the mega-kernel pattern
-      is not theoretical. The approach is real, it ships in production-adjacent systems, and the performance
-      gains are most pronounced in the small-batch, interactive-latency regime that matters most for deployed
-      products.
+      Recent mega-kernel research such as <strong>Mirage Persistent Kernel</strong> shows that this pattern is
+      not theoretical: compiling multi-GPU model inference into a single mega-kernel can reduce end-to-end
+      latency by reducing host orchestration and improving cross-stage scheduling. Related work such as
+      <strong>TileRT</strong> demonstrates production-adjacent implementations of this approach.
     </p>
 
     <div class="pull-quote">
@@ -927,6 +1004,14 @@ xl_persistent_megakernel&lt;&lt;&lt;N, block&gt;&gt;&gt;(
       makes this codebase worth following. The Python simulator is not a stepping stone to be discarded; it's
       a living correctness specification. Every behavior the CUDA scaffold implements was validated in Python first.
     </p>
+
+    <div class="pull-quote">
+      <p>
+        "LLM inference is not just a math problem anymore. At extreme scale, it becomes a scheduling, residency,
+        and orchestration problem. XL-Persistent-Kernel explores what happens when that orchestration moves from
+        the CPU into a persistent GPU-resident execution loop."
+      </p>
+    </div>
   </section>
 
 </main>

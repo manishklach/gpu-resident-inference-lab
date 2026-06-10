@@ -4,6 +4,21 @@ This document describes the CUDA staging layer for the persistent decode runtime
 
 The repo contains multiple stage helper files, but they are not independent launched kernels. They are device-side helpers intended to be inlined into the persistent mega-kernel. This preserves the central design: many logical stages, one resident GPU kernel.
 
+## What Is Fake Today
+
+All math in the current CUDA scaffold is fake and deterministic. No real transformer operations are performed:
+
+- **No real transformer math**: All token generation is `(last_token + 1 + request_id) % 32000`.
+- **No real KV data**: `stage_kv.cuh` only toggles flag bits; no key/value tensors are copied.
+- **No real page allocation**: KV pages are pre-allocated at init time.
+- **No real verification**: The verifier uses a modulo-based rule, not rejection sampling.
+- **No real draft model**: Draft tokens are deterministic offsets from the commit position.
+- **No real queues**: Work and completion queues are declared in `queue_desc.h` but not yet wired into the mega-kernel.
+- **No real scheduling**: Thread blocks are statically assigned to requests (one block = one request).
+- **No continuous batching**: Requests are pre-loaded; no admission mid-batch.
+
+The repo is a control-flow scaffold, not a production LLM runtime.
+
 ---
 
 ## Why One Mega-Kernel?
@@ -361,27 +376,31 @@ Relative:
 
 ---
 
-## What Is Intentionally Fake Today
+## Measurement Disclaimer
 
-- **No real transformer math**: All token generation is `(last_token + 1 + request_id) % 32000`.
-- **No real KV data**: `stage_kv.cuh` only toggles flag bits; no key/value tensors are copied.
-- **No real page allocation**: KV pages are pre-allocated at init time.
-- **No real verification**: The verifier uses a modulo-based rule, not rejection sampling.
-- **No real draft model**: Draft tokens are deterministic offsets from the commit position.
-- **No real queues**: Work and completion queues are declared in `queue_desc.h` but not yet wired into the mega-kernel.
-- **No real scheduling**: Thread blocks are statically assigned to requests (one block = one request).
-- **No continuous batching**: Requests are pre-loaded; no admission mid-batch.
-- **No grid-wide synchronization**: The all-done check in the mega-kernel is best-effort (block-level sync only).
+The current CUDA harness does not measure real transformer math, model quality, or production LLM throughput. It measures orchestration structure:
+
+- **Host kernel launch count** — each baseline launch incurs ~5–10 µs overhead
+- **Host synchronization count** — each sync incurs latency and memory fence costs
+- **Request lifecycle progress** — do requests complete correctly on both paths?
+- **Elapsed wall time** — total time for the control-flow scaffold to complete
+- **Tokens per second** — throughput through the deterministic stub
+
+**Important:** This is a measurement of orchestration structure, not LLM inference performance.
 
 ---
 
-## Future Real Implementation Path
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the full development plan.
+
+Key upcoming phases:
 
 - **Phase 2B**: Measured orchestration overhead (CUDA event timing, launch/sync counters, CSV export, make cuda-bench) — **in progress**.
 - **Phase 2C**: NVTX / profiler visibility (NVTX ranges around baseline loop and mega-kernel launch, Nsight Systems trace documentation) — **planned**.
-- **Phase 3**: Real fused decode/verify path with real attention, projection, sampling, KV tensors, block verification, continuous batching.
-- **Phase 4**: Dynamic request admission via device queues, continuous batching.
-- **Phase 5**: Multi-GPU tensor parallelism, NVLink communication overlap.
+- **Phase 3**: Real fused decode/verify path with real attention, projection, sampling, KV tensors, block verification, continuous batching — **planned**.
+- **Phase 4**: Dynamic request admission via device queues, continuous batching — **planned**.
+- **Phase 5**: Multi-GPU tensor parallelism, NVLink communication overlap — **planned**.
 
 ---
 
