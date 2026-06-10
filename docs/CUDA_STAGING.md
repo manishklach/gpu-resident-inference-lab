@@ -404,6 +404,30 @@ Key upcoming phases:
 
 ---
 
+## Mapping to Diffusion-Style Generation
+
+The persistent mega-kernel pattern is not limited to autoregressive decode. Diffusion-style language models (DiffusionGemma, MDLM, SSD-LM) refine tokens in parallel through a denoising loop. The same runtime idea applies: keep the loop on GPU, avoid CPU round-trips between refinement steps.
+
+### Stage Mapping
+
+| Autoregressive (main repo) | Diffusion-style (sketch) | Purpose |
+|---------------------------|--------------------------|---------|
+| `stage_prefill` | `denoise_canvas_step` | Initialize or perturb the token canvas |
+| `stage_decode` | `update_confidence_mask` | Score each token's confidence |
+| `stage_spec_verify` | `verify_or_resample` | Identify tokens that need resampling |
+| `stage_commit` | `commit_ready_tokens` | Mark stable tokens as committed |
+| `stage_kv` | `update_resident_state` | Track per-request refinement progress |
+
+### Common Runtime Idea
+
+**Fewer CPU round-trips, more GPU-resident control flow.** Whether the pipeline is autoregressive decode or diffusion refinement, the architectural bottleneck is the same: orchestrating many small GPU operations from the CPU. A persistent mega-kernel fuses the pipeline into one resident loop and removes the host from the critical path.
+
+### File
+
+See [`cuda/examples/diffusion_refinement_megakernel_sketch.cu`](../cuda/examples/diffusion_refinement_megakernel_sketch.cu) for the conceptual sketch.
+
+---
+
 ## Directory Structure
 
 ```
@@ -424,6 +448,9 @@ cuda/
     xl_persistent_megakernel.cu     - ONE fused persistent mega-kernel
     baseline_host_decode_kernel.cu  - Baseline comparison kernel (NOT part of mega-kernel)
     host_launcher.cpp               - Host launcher with baseline + mega-kernel paths
+
+  examples/
+    diffusion_refinement_megakernel_sketch.cu - Conceptual sketch: diffusion-style loop
 
   CMakeLists.txt           - Builds xlpk_cuda_smoke executable
 ```

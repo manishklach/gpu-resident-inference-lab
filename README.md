@@ -211,6 +211,9 @@ cuda/
         host_launcher.cpp              - Host launcher + smoke tests
     CMakeLists.txt      - Builds xlpk_cuda_smoke executable
 
+cuda/examples/
+    diffusion_refinement_megakernel_sketch.cu - Conceptual sketch: diffusion-style persistent kernel
+
 tests/
     test_runtime.py     - Runtime and worker tests
     test_kv_cache.py    - KV cache allocation, eviction, memory accounting
@@ -254,6 +257,31 @@ make cuda-smoke     # Builds and runs xlpk_cuda_smoke (tests both paths)
 ```
 
 Without CUDA, this target prints a friendly message and skips. See [docs/CUDA_STAGING.md](docs/CUDA_STAGING.md) for the full design document.
+
+## Diffusion-Style Refinement Loop Sketch
+
+Diffusion-style language models (e.g., DiffusionGemma, MDLM, SSD-LM) reduce sequential decode by refining many tokens in parallel through a series of denoising steps. A persistent mega-kernel is a complementary runtime idea for this setting: keep the entire denoise → refine → verify → commit → state-update loop resident on GPU, instead of bouncing through CPU orchestration between each diffusion step.
+
+The file [`cuda/examples/diffusion_refinement_megakernel_sketch.cu`](cuda/examples/diffusion_refinement_megakernel_sketch.cu) is a conceptual sketch showing this mapping:
+
+```
+Autoregressive (main repo):  prefill → decode → spec_verify → commit → KV update
+Diffusion-style (sketch):    denoise → update_confidence → verify_or_resample → commit → state update
+```
+
+**Common thesis:** Many logical stages, one resident GPU kernel. The stage names differ, but the control-flow architecture is the same — minimize CPU round-trips by keeping the iteration loop on device.
+
+```cuda
+while (!*shutdown && !r->done) {
+    denoise_canvas_step(r, canvas);
+    update_confidence_mask(r, canvas);
+    verify_or_resample(r, canvas);
+    commit_ready_tokens(r, canvas);
+    update_resident_state(r, state);
+}
+```
+
+> **This sketch is not an implementation of DiffusionGemma. It is a systems-level mapping of the persistent mega-kernel idea to diffusion-style token refinement. All math is fake/deterministic.**
 
 ## Measurement: Host-Launched Decode vs Persistent Mega-Kernel
 
