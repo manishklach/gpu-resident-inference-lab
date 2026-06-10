@@ -259,7 +259,11 @@ class PersistentDecodeRuntime:
         )
         self.verifier = verifier or SpeculativeVerifier(AcceptancePolicy())
         self.backend = backend or CPUStubBackend()
-        self.kv_cache = kv_cache or KVCache(page_size=config.page_size, max_pages=config.max_pages)
+        self.kv_cache = kv_cache or KVCache(
+            page_size=config.page_size,
+            max_pages=config.max_pages,
+            config=config,
+        )
         self.worker_pool = WorkerPool(
             config=config,
             backend=self.backend,

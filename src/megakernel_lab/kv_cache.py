@@ -373,12 +373,28 @@ class KVCache:
         return positions
 
     def release_request(self, request_id: int) -> None:
-        """Drop all pages belonging to a request."""
+        """Drop all pages belonging to a request and update memory accounting."""
         keys = [key for key in self._page_table if key[0] == request_id]
         for key in keys:
             for page_id in self._page_table.pop(key, []):
-                self._pages.pop(page_id, None)
+                page = self._pages.pop(page_id, None)
                 self._lru.pop(page_id, None)
+                if page is not None:
+                    page_bytes = page.token_count * self._bytes_per_token_per_layer()
+                    self._total_live_kv_bytes -= page_bytes
+                    self._used_capacity_tokens -= page.token_count
+                    self._total_capacity_tokens -= self.page_size
+                    if page.pinned:
+                        self._pinned_kv_bytes -= page_bytes
+        # Defensive clamp: counters should never go negative
+        if self._total_live_kv_bytes < 0:
+            self._total_live_kv_bytes = 0
+        if self._pinned_kv_bytes < 0:
+            self._pinned_kv_bytes = 0
+        if self._used_capacity_tokens < 0:
+            self._used_capacity_tokens = 0
+        if self._total_capacity_tokens < 0:
+            self._total_capacity_tokens = 0
 
     def residency_report(self) -> dict[str, float | int]:
         """Return a cache residency summary with memory accounting.

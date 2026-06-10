@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.18)
-project(XLPersistentKernelCUDA LANGUAGES CUDA CXX)
+project(xlpk_cuda_smoke LANGUAGES CUDA CXX)
 
 # Require CUDA
 find_package(CUDAToolkit REQUIRED)
 
 # Set CUDA architecture (adjust for your GPU)
-# Common options: sm_70 (V100), sm_80 (A100), sm_86 (RTX 3090), sm_89 (RTX 4090)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "70;80;86")
 endif()
@@ -14,19 +13,20 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CXX_STANDARD 17)
 
-# Build the persistent decode stub
-add_executable(persistent_decode_stub
-    persistent_decode_stub.cu
+# Include directories (headers + .cuh stage helpers)
+set(INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# Sources: the mega-kernel, the baseline comparison kernel, and the host launcher.
+# The stage helpers (.cuh) are included by the mega-kernel at compile time;
+# they are NOT compiled separately.
+add_executable(xlpk_cuda_smoke
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/xl_persistent_megakernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/baseline_host_decode_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/host_launcher.cpp
 )
 
-target_include_directories(persistent_decode_stub PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
+target_include_directories(xlpk_cuda_smoke PRIVATE ${INCLUDE_DIRS})
 
-# Link CUDA runtime
-target_link_libraries(persistent_decode_stub
-    CUDA::cudart
-)
+target_link_libraries(xlpk_cuda_smoke CUDA::cudart)
 
-# Install target (optional)
-install(TARGETS persistent_decode_stub DESTINATION bin)
+install(TARGETS xlpk_cuda_smoke DESTINATION bin)

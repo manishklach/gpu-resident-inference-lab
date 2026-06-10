@@ -27,12 +27,18 @@ from .state import RequestState
 
 
 class BenchmarkMode(str, Enum):
-    """Available benchmark modes."""
+    """Available benchmark modes.
+
+    These modes model the control-flow paths that the persistent mega-kernel
+    will fuse into a single GPU-resident loop. Python benchmarks are
+    control-flow simulations, not CUDA measurements.
+    """
 
     SERIAL_DECODE = "serial_decode"
     SPECULATIVE_DECODE = "speculative_decode"
     FORCED_REJECTION = "forced_rejection"
     KV_PRESSURE = "kv_pressure"
+    MEGA_KERNEL_SIM = "mega_kernel_sim"
 
 
 @dataclass(slots=True)
@@ -57,11 +63,16 @@ class BenchmarkRecord:
 class BenchmarkRunner:
     """Runs deterministic batch and block-size sweeps over the simulator.
 
-    Supports four modes:
+    Supports five modes:
     - serial_decode: block_size=1, no speculation
     - speculative_decode: configurable block size
     - forced_rejection: mismatch_stride forces periodic rejections
     - kv_pressure: small max_pages to trigger evictions
+    - mega_kernel_sim: models the fused mega-kernel control path (draft → verify → commit loop)
+      This is NOT a CUDA measurement; it simulates the control-flow architecture.
+
+    Python benchmarks are control-flow simulations. The CUDA smoke test
+    (make cuda-smoke) validates the staging path on real hardware.
     """
 
     def __init__(
@@ -113,8 +124,16 @@ class BenchmarkRunner:
             block_size = 1
         elif mode == BenchmarkMode.FORCED_REJECTION:
             mismatch_stride = 2
+        elif mode == BenchmarkMode.MEGA_KERNEL_SIM:
+            # Models the persistent mega-kernel's fused control path:
+            # decode → draft → verify → commit → decode loop.
+            # This runs on CPU only; it simulates the control-flow architecture.
+            pass
         elif mode == BenchmarkMode.KV_PRESSURE:
-            max_pages = max(4, batch_size * 2)  # Intentionally small
+            # Intentionally tight: each request ~6 pages (3 per layer * 2 layers)
+            # for prompt=3 + max_new_tokens=8 with page_size=4.
+            # Use multiplier 3 to leave room for prefill+decode but still trigger evictions.
+            max_pages = max(8, batch_size * 3)  # Intentionally small
 
         config = RuntimeConfig(
             block_size=block_size,

@@ -147,3 +147,36 @@ def test_pinning_updates_pinned_bytes() -> None:
     cache.unpin_pages(page_ids)
     report_unpinned2 = cache.residency_report()
     assert report_unpinned2["pinned_kv_bytes"] == 0
+
+
+def test_release_request_accounting_zeros_counters() -> None:
+    """After release_request, all accounting counters should be zero."""
+    config = RuntimeConfig(
+        num_heads=4, head_dim=32, dtype_bytes=2, kv_tensors_per_token=2, num_layers=1
+    )
+    cache = KVCache(page_size=2, max_pages=8, config=config)
+    request = RequestState(
+        request_id=50,
+        prompt_tokens=[100, 101],
+        target_tokens=[1, 2, 3, 0],
+        max_new_tokens=8,
+        eos_token_id=0,
+        layer_ids=[0],
+    )
+    cache.allocate_for_request(request, total_tokens=2, pinned=True)
+    report = cache.residency_report()
+
+    # After allocation, live_pages > 0 and live_kv_bytes > 0
+    assert report["live_pages"] > 0
+    assert report["live_kv_bytes"] > 0
+    assert report["pinned_kv_bytes"] > 0
+
+    cache.release_request(request.request_id)
+    report_after = cache.residency_report()
+
+    # After release, all should be zero
+    assert report_after["live_pages"] == 0
+    assert report_after["pinned_pages"] == 0
+    assert report_after["live_kv_bytes"] == 0
+    assert report_after["pinned_kv_bytes"] == 0
+    assert report_after["fragmentation_ratio"] == 0.0

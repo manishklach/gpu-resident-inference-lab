@@ -42,6 +42,56 @@ graph LR
 7. Accepted tokens are committed; rejected draft pages are released.
 8. The request completes when EOS is hit, the token budget is exhausted, or the target is fully matched.
 
+## Mega-Kernel Design Philosophy
+
+XL-Persistent-Kernel is built around one idea: the inference-serving pipeline should not be a long chain of CPU-launched GPU kernels. Prefill, decode, speculative verification, commit, and KV-cache updates are modeled as logical stages inside one persistent GPU mega-kernel.
+
+The goal is to reduce:
+- repeated kernel launches
+- CPU scheduling overhead
+- CPU–GPU synchronization
+- fragmented GPU execution
+- host-controlled token loops
+- avoidable KV-cache movement
+
+The result is a serving model where more request state and scheduling progress stays on the GPU.
+
+This means:
+
+- **Prefill**, **decode**, **speculative verification**, **commit**, and **KV page updates** are modeled as **logical stages inside one resident kernel** — not separate GPU kernel launches.
+- The device-side loop (in `xl_persistent_megakernel.cu`) calls `__forceinline__ __device__` stage helpers from `.cuh` files, all fused into a single compiled device function.
+- There is exactly **one** GPU kernel that stays resident for the entire request lifetime. Host involvement is limited to submission and completion polling.
+
+The only separate CUDA kernel is `baseline_host_decode_kernel.cu`, which exists **solely as a baseline for comparison** — it represents the conventional host-launched model that this project aims to supersede.
+
+### Why This Matters for 1T-Class Models
+
+For 1T-class models, especially sparse/MoE systems, throughput is limited not only by FLOPs but by orchestration: token-by-token launch overhead, fragmented decode stages, KV-cache residency, inter-GPU communication, and speculative verification/commit overhead. A persistent mega-kernel is one execution technique for pushing such systems toward 1K+ tokens/sec when combined with:
+
+- MoE or sparsity
+- Quantization
+- Speculative decoding
+- Paged KV cache
+- Continuous batching
+- Multi-GPU parallelism
+- Communication overlap
+- GPU-resident scheduling
+
+**Important:** A mega-kernel alone does not make dense 1T models exceed 1K TPS. It is one key component in the overall serving architecture. This repo does not serve a real 1T model — it is a control-flow scaffold for the persistent mega-kernel execution model.
+
+### Component Table
+
+| Component | Role | Today | Future |
+|-----------|------|-------|--------|
+| `xl_persistent_megakernel` | Fused resident GPU control loop | Deterministic control-flow scaffold | Real fused inference pipeline |
+| `stage_prefill` | Logical prefill stage | Metadata only | Real prefill attention |
+| `stage_decode` | Logical decode stage | Deterministic token generation | Real decode kernel path |
+| `stage_spec_verify` | Speculative verifier | Deterministic accept/reject | Target-model verification |
+| `stage_commit` | Accept/commit stage | Metadata transition | Fused token/KV commit |
+| `stage_kv` | KV lifecycle helpers | Metadata only | Real paged KV movement |
+| `stage_scheduler` | Device-side request picker | Linear scan + priority | GPU-resident scheduler |
+| `baseline_host_decode_kernel` | Comparison baseline | One step per host launch | Performance baseline |
+
 ## What Is Implemented Today
 
 - **Runtime simulator** with specialized prefill and decode workers
@@ -50,7 +100,7 @@ graph LR
 - **Backend interface** (`AbstractKernelBackend`) + deterministic CPU stub backend
 - **Benchmark harness** exporting TTFT, ITL, acceptance rate, KV hit rate, live/pinned KV bytes, fragmentation
 - **Speculative KV distinction** between committed and draft pages
-- **CUDA staging layer** with a persistent-kernel stub (optional build)
+- **CUDA staging layer** with one `xl_persistent_megakernel` + one baseline comparison kernel + six device-side stage helpers (optional build)
 - **CI pipeline** (pytest + ruff + mypy on Python 3.10/3.11/3.12)
 - **Tests** covering runtime, KV cache, speculative KV lifecycle, and benchmark schema
 
@@ -115,6 +165,18 @@ make test
 make bench
 ```
 
+## Benchmark Modes
+
+| Mode | Description |
+|------|-------------|
+| `serial_decode` | Block size 1, no speculation (CPU simulates host-launched decode) |
+| `speculative_decode` | Configurable block size with draft/verify/commit loop |
+| `forced_rejection` | Mismatch stride forces periodic draft rejections |
+| `kv_pressure` | Undersized KV cache to trigger eviction stress |
+| `mega_kernel_sim` | Models the fused mega-kernel control path (draft → verify → commit loop on CPU) — **not a CUDA measurement** |
+
+All Python benchmarks are control-flow simulations. The CUDA smoke test (`make cuda-smoke`) validates the staging path on real hardware.
+
 ## Benchmark Example Output
 
 ```
@@ -141,9 +203,22 @@ src/megakernel_lab/
     demo.py             - Runnable demo comparing decode modes
 
 cuda/
-    persistent_decode_stub.cu  - Minimal CUDA persistent-kernel stub
-    request_desc.h             - Request descriptor struct for device
-    CMakeLists.txt             - Optional CUDA build
+    include/            - CUDA headers + stage helpers (.cuh)
+        request_desc.h                 - Request descriptor struct
+        kv_page_table.h                - KV page entry/table structs
+        queue_desc.h                   - Ring queue descriptor
+        kernel_status.h                - Request lifecycle states
+        stage_scheduler.cuh            - Device-side request scheduler (inline)
+        stage_prefill.cuh              - Prefill stage helper (inline)
+        stage_decode.cuh               - Decode stage helper (inline)
+        stage_spec_verify.cuh          - Verify stage helper (inline)
+        stage_commit.cuh               - Commit stage helper (inline)
+        stage_kv.cuh                   - KV page lifecycle helpers (inline)
+    src/
+        xl_persistent_megakernel.cu    - THE fused persistent mega-kernel
+        baseline_host_decode_kernel.cu - Baseline comparison kernel
+        host_launcher.cpp              - Host launcher + smoke tests
+    CMakeLists.txt      - Builds xlpk_cuda_smoke executable
 
 tests/
     test_runtime.py     - Runtime and worker tests
@@ -153,9 +228,41 @@ tests/
 
 docs/
     ARCHITECTURE.md     - Design intent and core concepts
-    CUDA_STAGING.md     - Host/device queue design document
+    CUDA_STAGING.md     - Kernel inventory, lifecycle, and queue design
     ROADMAP.md          - Development phases
 ```
+
+## CUDA Staging Layer
+
+The `cuda/` directory contains the **one** persistent mega-kernel (`xl_persistent_megakernel`) and a baseline comparison kernel (`baseline_host_decode_kernel`).
+
+The mega-kernel is the centerpiece: a single persistent GPU kernel that fuses all pipeline stages (prefill, decode, speculative verify, commit, KV update, scheduling) into a device-resident loop. Stage helpers are `__forceinline__ __device__` functions in `.cuh` files — they are **not** separately launched kernels.
+
+### Mega-Kernel Stages (device-side inline helpers)
+
+| Stage | File | Purpose | Real today? | Future |
+|-------|------|---------|-------------|--------|
+| Scheduler | `stage_scheduler.cuh` | Pick next request | Linear scan + priority | GPU-resident scheduler |
+| Prefill | `stage_prefill.cuh` | Mark prompt/KV initialized | Fake math | Real prefill attention |
+| Decode | `stage_decode.cuh` | Produce token + draft block | Deterministic tokens | Fused decode kernel |
+| Verify | `stage_spec_verify.cuh` | Accept/reject draft | Deterministic rule | Rejection sampling |
+| Commit | `stage_commit.cuh` | Commit tokens | Metadata update | Fused commit |
+| KV helpers | `stage_kv.cuh` | Page flag/lifecycle utilities | Flag toggle only | Real KV copy |
+
+### Only Two Kernels
+
+| Kernel | File | Purpose |
+|--------|------|---------|
+| `xl_persistent_megakernel` | `src/xl_persistent_megakernel.cu` | **The** persistent fused mega-kernel |
+| `baseline_host_decode_kernel` | `src/baseline_host_decode_kernel.cu` | Baseline comparison (conventional host-launched) |
+
+### Build and Run (requires CUDA toolkit)
+
+```bash
+make cuda-smoke     # Builds and runs xlpk_cuda_smoke (tests both paths)
+```
+
+Without CUDA, this target prints a friendly message and skips. See [docs/CUDA_STAGING.md](docs/CUDA_STAGING.md) for the full design document.
 
 ## Development
 

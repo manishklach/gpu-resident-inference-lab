@@ -19,20 +19,33 @@ The foundation: a Python simulator that models the exact control flow a persiste
 
 This phase ensures we get the state machine right before touching CUDA.
 
-## Phase 2: CUDA Persistent-Kernel Stub
+## Phase 2A: Mega-Kernel CUDA Control-Flow Scaffold
 
-**Status: Scaffolded**
+**Status: In progress**
 
-A minimal CUDA kernel that demonstrates the control flow without real transformer math.
+The fused persistent mega-kernel as a device-side control-flow scaffold. No real transformer math yet.
 
-- Request descriptor struct (`request_desc.h`)
-- Persistent decode loop (`persistent_decode_stub.cu`)
-- Host submission queue and device work queue design
-- Completion queue for host consumption
-- Shutdown protocol
-- Optional build target (`make cuda-stub`)
+- Request descriptor with lifecycle states and flags
+- Device-side stage helpers: prefill, decode, verify, commit, KV, scheduler
+- Fake KV page metadata and lifecycle transitions
+- `xl_persistent_megakernel.cu` — the fused resident kernel
+- `baseline_host_decode_kernel.cu` — host-launched baseline for comparison
+- CUDA smoke test (`make cuda-smoke`) comparing baseline launches vs one mega-kernel launch
+- Stage helpers are `__forceinline__ __device__` functions, not separate kernels
 
-This phase proves the host/device interface works before adding real kernels.
+**Key principle:** Many logical inference stages, one persistent mega-kernel.
+
+## Phase 2B: Measured Launch-Overhead Comparison
+
+**Planned**
+
+Instrument the smoke test to measure the overhead the mega-kernel eliminates.
+
+- CUDA events for wall-time measurement
+- Launch count comparison (N vs 1)
+- Baseline repeated launch overhead vs one mega-kernel launch
+- Optional NVTX range annotations
+- Document the dispatch/synchronization cost ratio
 
 ## Phase 3: Real Fused Decode/Verify Kernels
 
@@ -47,10 +60,11 @@ Replace the stub with actual transformer operations.
 - Fused verification kernel
 - Page table updates on device
 - Memory-efficient attention (FlashAttention-style)
+- Continuous batching with dynamic request admission
 
 Key challenge: keeping the persistent loop efficient while adding real math.
 
-## Phase 4: Continuous Batching and Multi-Request Scheduling
+## Phase 4: Multi-Request Scheduling and Admission
 
 **Planned**
 
@@ -85,7 +99,7 @@ This phase targets production-scale LLM serving.
 The project succeeds when:
 
 1. The CPU simulator accurately models the control flow of the CUDA implementation
-2. The CUDA stub runs on real hardware without host-device synchronization during decode
-3. Fused kernels achieve >10x throughput improvement over per-token launch
+2. The CUDA mega-kernel runs on real hardware without host-device synchronization during decode
+3. Fused kernels demonstrate measurable launch-overhead reduction vs per-token launch
 4. Multi-GPU scaling demonstrates near-linear speedup on NVLink-connected nodes
 5. The benchmark harness measures realistic metrics (TTFT, ITL, throughput)
