@@ -11,6 +11,7 @@ The foundation: a Python simulator that models the exact control flow a persiste
 - Persistent runtime with specialized prefill and decode workers
 - Paged KV-cache planner with LRU eviction and pinning
 - Speculative block proposal and verification
+- MSA-inspired sparse KV page selection over logical blocks
 - Backend interface (`AbstractKernelBackend`) with CPU stub
 - Memory accounting (live bytes, pinned bytes, evicted bytes, fragmentation)
 - Speculative KV distinction (committed vs draft pages)
@@ -27,6 +28,7 @@ The fused persistent mega-kernel as a device-side control-flow scaffold. No real
 
 - Request descriptor with lifecycle states and flags
 - Device-side stage helpers: prefill, decode, verify, commit, KV, scheduler
+- Device-side sparse KV block selection stage between scheduling and decode
 - Fake KV page metadata and lifecycle transitions
 - `xl_persistent_megakernel.cu` — the fused resident kernel
 - `baseline_host_decode_kernel.cu` — host-launched baseline for comparison
@@ -34,6 +36,20 @@ The fused persistent mega-kernel as a device-side control-flow scaffold. No real
 - Stage helpers are `__forceinline__ __device__` functions, not separate kernels
 
 **Key principle:** Many logical inference stages, one persistent mega-kernel.
+
+## Phase 2A.1: Sparse KV Control-Flow Scaffold
+
+**Status: In progress**
+
+Extend the persistent decode scaffold with deterministic sparse-KV selection.
+
+- `stage_sparse_kv_select.cuh` device helper for top-k KV block selection
+- Per-page score / selected / last_selected_step / sparse_rank metadata
+- Python `SparseKVSelector` mirroring the CUDA control path
+- Benchmark metrics for total vs selected KV blocks and estimated bytes saved
+- Tests that verify selected pages stay pinned during decode and released draft pages are not re-selected
+
+**Important:** This phase does not implement MiniMax MSA, FlashAttention, or production sparse attention. It models control flow and memory scheduling only.
 
 ## Phase 2B: Measured Orchestration Overhead
 

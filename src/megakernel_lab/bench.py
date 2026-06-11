@@ -45,6 +45,7 @@ class BenchmarkMode(str, Enum):
     FORCED_REJECTION = "forced_rejection"
     KV_PRESSURE = "kv_pressure"
     MEGA_KERNEL_SIM = "mega_kernel_sim"
+    SPARSE_KV_MEGAKERNEL = "sparse_kv_megakernel"
 
     AUTOREGRESSIVE_SERIAL = "autoregressive_serial"
     BLOCK_SPECULATIVE = "block_speculative"
@@ -85,6 +86,12 @@ class BenchmarkRecord:
     min_block_size: int = 0
     max_block_size: int = 0
     block_size_variance: float = 0.0
+    kv_blocks_total: int = 0
+    kv_blocks_selected: int = 0
+    kv_sparsity_ratio: float = 0.0
+    estimated_kv_bytes_read: int = 0
+    estimated_kv_bytes_saved: int = 0
+    tokens_per_resident_loop: float = 0.0
 
 
 class BenchmarkRunner:
@@ -158,6 +165,8 @@ class BenchmarkRunner:
             # decode → draft → verify → commit → decode loop.
             # This runs on CPU only; it simulates the control-flow architecture.
             pass
+        elif mode == BenchmarkMode.SPARSE_KV_MEGAKERNEL:
+            pass
         elif mode == BenchmarkMode.KV_PRESSURE:
             # Intentionally tight: each request ~6 pages (3 per layer * 2 layers)
             # for prompt=3 + max_new_tokens=8 with page_size=4.
@@ -173,6 +182,9 @@ class BenchmarkRunner:
             num_layers=2,
             num_prefill_workers=2,
             num_decode_workers=2,
+            enable_sparse_kv=mode == BenchmarkMode.SPARSE_KV_MEGAKERNEL,
+            sparse_top_k=max(1, min(block_size, 4)),
+            kv_block_size=4,
         )
         backend = CPUStubBackend(
             BackendLatencyConfig(
@@ -229,6 +241,16 @@ class BenchmarkRunner:
             variance = sum((x - mean_bs) ** 2 for x in block_sizes) / len(block_sizes)
         else:
             variance = 0.0
+        kv_blocks_total = sum(result.kv_blocks_total for result in results)
+        kv_blocks_selected = sum(result.kv_blocks_selected for result in results)
+        estimated_kv_bytes_read = sum(result.estimated_kv_bytes_read for result in results)
+        estimated_kv_bytes_saved = sum(result.estimated_kv_bytes_saved for result in results)
+        kv_sparsity_ratio = 0.0
+        if kv_blocks_total > 0:
+            kv_sparsity_ratio = max(0.0, 1.0 - (kv_blocks_selected / kv_blocks_total))
+        total_iterations = max(sum(len(result.traces) for result in results), 1)
+        total_committed = sum(len(result.committed_tokens) for result in results)
+        tokens_per_resident_loop = total_committed / total_iterations
 
         return BenchmarkRecord(
             batch_size=batch_size,
@@ -248,6 +270,12 @@ class BenchmarkRunner:
             min_block_size=min_bs,
             max_block_size=max_bs,
             block_size_variance=variance,
+            kv_blocks_total=kv_blocks_total,
+            kv_blocks_selected=kv_blocks_selected,
+            kv_sparsity_ratio=kv_sparsity_ratio,
+            estimated_kv_bytes_read=estimated_kv_bytes_read,
+            estimated_kv_bytes_saved=estimated_kv_bytes_saved,
+            tokens_per_resident_loop=tokens_per_resident_loop,
         )
 
     def _run_block_single(
@@ -336,6 +364,7 @@ class BenchmarkRunner:
             host_kernel_launches=launches,
             host_synchronizations=syncs,
             simulated_tokens_per_iteration=tokens_per_iter,
+            tokens_per_resident_loop=tokens_per_iter,
         )
 
     def run(self, modes: list[BenchmarkMode] | None = None) -> pd.DataFrame:

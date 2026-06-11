@@ -67,6 +67,7 @@
 #include "stage_decode.cuh"
 #include "stage_spec_verify.cuh"
 #include "stage_commit.cuh"
+#include "stage_sparse_kv_select.cuh"
 
 __global__ void xl_persistent_megakernel(
     RequestDescriptor* requests,
@@ -91,7 +92,9 @@ __global__ void xl_persistent_megakernel(
             asbs_initialized = true;
         }
         if (!req->is_done()) {
+            // Scheduling is implicit here: each resident block owns one request.
             stage_prefill(req, &kv_table);
+            select_sparse_kv_blocks(req, &kv_table, req->current_block_size);
             stage_decode(req, draft_tokens);
             stage_spec_verify(req, draft_tokens);
             stage_commit(req, &kv_table);

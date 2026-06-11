@@ -5,7 +5,7 @@
 [![License: Research](https://img.shields.io/badge/license-Research%20Use-yellow)](LICENSE)
 [![Blog](https://img.shields.io/badge/GitHub%20Pages-blog-green)](https://manishklach.github.io/XL-Persistent-Kernel/)
 
-**XL-Persistent-Kernel explores a persistent GPU mega-kernel execution model for LLM serving.** The goal is to move the decode-serving control loop from CPU-orchestrated kernel launches into one GPU-resident execution loop. Prefill, decode, speculative verification, commit, and KV lifecycle management are modeled as logical stages inside one persistent kernel. · [Read the blog](https://manishklach.github.io/XL-Persistent-Kernel/)
+**XL-Persistent-Kernel explores a persistent GPU mega-kernel execution model for LLM serving.** The goal is to move the decode-serving control loop from CPU-orchestrated kernel launches into one GPU-resident execution loop. Prefill, sparse KV selection, decode, speculative verification, commit, and KV lifecycle management are modeled as logical stages inside one persistent kernel. · [Read the blog](https://manishklach.github.io/XL-Persistent-Kernel/)
 
 This repository is not a production inference stack. It is a research scaffold for building the control flow, scheduling, and memory-management infrastructure that a persistent CUDA decode kernel will eventually need.
 
@@ -19,23 +19,25 @@ The simulator runs entirely on CPU today, but it is structured so that every abs
 graph LR
     A[Request Submit] --> B[Prefill Worker]
     B --> C[KV Page Planner]
-    C --> D[Decode Worker]
-    D --> E[Speculative Proposer]
-    E --> F[Verifier]
-    F -->|Accepted| G[Commit Tokens]
-    F -->|Rejected| H[Discard Draft Pages]
-    G --> I[Request Complete]
-    H --> D
+    C --> D[Sparse KV Selector]
+    D --> E[Decode Worker]
+    E --> F[Speculative Proposer]
+    F --> G[Verifier]
+    G -->|Accepted| H[Commit Tokens]
+    G -->|Rejected| I[Discard Draft Pages]
+    H --> J[Request Complete]
+    I --> D
 
     style A fill:#e1f5fe
     style B fill:#fff3e0
     style C fill:#fff3e0
-    style D fill:#e8f5e9
+    style D fill:#e3f2fd
     style E fill:#e8f5e9
-    style F fill:#fce4ec
-    style G fill:#c8e6c9
-    style H fill:#ffcdd2
-    style I fill:#c8e6c9
+    style F fill:#e8f5e9
+    style G fill:#fce4ec
+    style H fill:#c8e6c9
+    style I fill:#ffcdd2
+    style J fill:#c8e6c9
 ```
 
 **Request lifecycle:**
@@ -43,11 +45,12 @@ graph LR
 1. A request is submitted with prompt tokens and a target output sequence.
 2. The **prefill worker** processes the prompt and builds the initial KV-cache pages.
 3. The **KV page planner** allocates physical pages across all layers.
-4. The **decode worker** pins the active pages and runs the decode loop.
-5. The **speculative proposer** drafts a block of candidate tokens.
-6. The **verifier** checks the draft against the target and the backend.
-7. Accepted tokens are committed; rejected draft pages are released.
-8. The request completes when EOS is hit, the token budget is exhausted, or the target is fully matched.
+4. The **sparse KV selector** scores committed pages, picks a deterministic top-k subset, and marks those blocks as selected for the next decode step.
+5. The **decode worker** pins the selected pages and runs the decode loop against that logical subset.
+6. The **speculative proposer** drafts a block of candidate tokens.
+7. The **verifier** checks the draft against the target and the backend.
+8. Accepted tokens are committed; rejected draft pages are released.
+9. The request completes when EOS is hit, the token budget is exhausted, or the target is fully matched.
 
 ## Mega-Kernel Design Philosophy
 
@@ -65,7 +68,7 @@ The result is a serving model where more request state and scheduling progress s
 
 This means:
 
-- **Prefill**, **decode**, **speculative verification**, **commit**, and **KV page updates** are modeled as **logical stages inside one resident kernel** — not separate GPU kernel launches.
+- **Prefill**, **sparse KV selection**, **decode**, **speculative verification**, **commit**, and **KV page updates** are modeled as **logical stages inside one resident kernel** — not separate GPU kernel launches.
 - The device-side loop (in `xl_persistent_megakernel.cu`) calls `__forceinline__ __device__` stage helpers from `.cuh` files, all fused into a single compiled device function.
 - There is exactly **one** GPU kernel that stays resident for the entire request lifetime. Host involvement is limited to submission and completion polling.
 
@@ -92,6 +95,7 @@ For 1T-class models, especially sparse/MoE systems, throughput is limited not on
 |-----------|------|-------|--------|
 | `xl_persistent_megakernel` | Fused resident GPU control loop | Deterministic control-flow scaffold | Real fused inference pipeline |
 | `stage_prefill` | Logical prefill stage | Metadata only | Real prefill attention |
+| `stage_sparse_kv_select` | Sparse KV block picker | Deterministic top-k metadata selection | Real sparse attention routing |
 | `stage_decode` | Logical decode stage | Deterministic token generation | Real decode kernel path |
 | `stage_spec_verify` | Speculative verifier | Deterministic accept/reject | Target-model verification |
 | `stage_commit` | Accept/commit stage | Metadata transition | Fused token/KV commit |
@@ -108,8 +112,9 @@ The current CUDA scaffold does not measure real transformer math, model quality,
 - **Runtime simulator** with specialized prefill and decode workers
 - **Speculative block proposal and verification** with configurable acceptance policy
 - **Paged KV-cache planner** with LRU eviction, pinning, and memory accounting
+- **MSA-inspired sparse KV selection scaffold** over logical KV pages with deterministic top-k selection
 - **Backend interface** (`AbstractKernelBackend`) + deterministic CPU stub backend
-- **Benchmark harness** exporting TTFT, ITL, acceptance rate, KV hit rate, live/pinned KV bytes, fragmentation
+- **Benchmark harness** exporting TTFT, ITL, acceptance rate, KV hit rate, live/pinned KV bytes, fragmentation, and sparse KV traffic estimates
 - **Speculative KV distinction** between committed and draft pages
 - **CUDA staging layer** with one `xl_persistent_megakernel` + one baseline comparison kernel + six device-side stage helpers (optional build)
 - **CI pipeline** (pytest + ruff + mypy on Python 3.10/3.11/3.12)
@@ -165,6 +170,7 @@ make bench
 | `forced_rejection` | Mismatch stride forces periodic draft rejections |
 | `kv_pressure` | Undersized KV cache to trigger eviction stress |
 | `mega_kernel_sim` | Models the fused mega-kernel control path (draft → verify → commit loop on CPU) — **not a CUDA measurement** |
+| `sparse_kv_megakernel` | Adds deterministic top-k KV block selection before decode to model reduced KV traffic — **not real sparse attention math** |
 
 All Python benchmarks are control-flow simulations. The CUDA smoke test (`make cuda-smoke`) validates the staging path on real hardware.
 
@@ -188,6 +194,7 @@ src/megakernel_lab/
     state.py            - Request, worker, and backend state objects
     runtime.py          - Persistent decode runtime with worker pool
     kv_cache.py         - Paged KV-cache with LRU eviction, pinning, memory accounting
+    sparse_kv.py        - Deterministic sparse KV block selector scaffold
     spec_decode.py      - Speculative block proposer and verifier
     backend.py          - Abstract kernel backend + CPU stub
     bench.py            - Benchmark harness with CSV export
@@ -209,6 +216,7 @@ cuda/
         stage_spec_verify.cuh          - Verify stage helper (inline)
         stage_commit.cuh               - Commit stage helper (inline)
         stage_kv.cuh                   - KV page lifecycle helpers (inline)
+        stage_sparse_kv_select.cuh     - Sparse KV top-k selection helper (inline)
     src/
         xl_persistent_megakernel.cu    - THE fused persistent mega-kernel
         baseline_host_decode_kernel.cu - Baseline comparison kernel
@@ -250,6 +258,7 @@ The mega-kernel is the centerpiece: a single persistent GPU kernel that fuses al
 |-------|------|---------|-------------|--------|
 | Scheduler | `stage_scheduler.cuh` | Pick next request | Linear scan + priority | GPU-resident scheduler |
 | Prefill | `stage_prefill.cuh` | Mark prompt/KV initialized | Fake math | Real prefill attention |
+| Sparse KV select | `stage_sparse_kv_select.cuh` | Score resident KV blocks and pick top-k | Deterministic metadata only | Real sparse attention routing |
 | Decode | `stage_decode.cuh` | Produce token + draft block | Deterministic tokens | Fused decode kernel |
 | Verify | `stage_spec_verify.cuh` | Accept/reject draft | Deterministic rule | Rejection sampling |
 | Commit | `stage_commit.cuh` | Commit tokens | Metadata update | Fused commit |
@@ -326,6 +335,26 @@ Once the runtime proposes a **block** of draft tokens in parallel, the persisten
 > The persistent kernel keeps that block-level workflow resident and flowing.
 
 This repo models these ideas with fake deterministic math and lifecycle counters. It does not implement Xiaomi DFlash, TileRT, or real transformer inference.
+
+## MSA-Inspired Sparse KV Selection
+
+This repo now includes an **MSA-inspired sparse KV selection scaffold**. For each decode iteration, the runtime scores logical KV pages using deterministic metadata, selects a top-k subset, pins those selected blocks, and passes only that subset into the logical decode and verify stages.
+
+This is intentionally precise about what it is and is not:
+
+- It is **not** MiniMax MSA.
+- It is **not** FlashAttention.
+- It is **not** production sparse attention math.
+- It **is** a research scaffold for control flow and memory scheduling inspired by sparse attention systems.
+
+What this demonstrates is the convergence of:
+
+- speculative/token-parallel decode
+- sparse KV block selection
+- persistent GPU-resident execution
+- KV lifecycle management
+
+What it does **not** claim is model-quality preservation or production throughput. The current metrics estimate reduced KV traffic and orchestration structure only.
 
 Additional files:
 

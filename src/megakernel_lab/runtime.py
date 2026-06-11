@@ -15,6 +15,7 @@ from .spec_decode import (
     SpeculativeVerifier,
     update_block_size,
 )
+from .sparse_kv import SparseKVSelector
 from .state import (
     DecodeResult,
     DecodeStepTrace,
@@ -114,6 +115,7 @@ class DecodeWorker:
         block_size: int,
         adaptive_policy: AdaptiveBlockPolicy | None = None,
         keep_ready_pinned: bool = True,
+        sparse_selector: SparseKVSelector | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.backend = backend
@@ -123,6 +125,7 @@ class DecodeWorker:
         self.block_size = block_size
         self.adaptive_policy = adaptive_policy
         self.keep_ready_pinned = keep_ready_pinned
+        self.sparse_selector = sparse_selector
         self.stats = WorkerStats()
 
     def _rehydrate_if_needed(self, request: RequestState) -> float:
@@ -155,16 +158,32 @@ class DecodeWorker:
         request.phase = RequestPhase.DECODE
         request.decode_worker_id = self.worker_id
         rehydration_latency_ms = self._rehydrate_if_needed(request)
-        self.kv_cache.pin_pages(request.kv_page_ids)
-        self.kv_cache.touch_request(request)
+        decode_step = len(request.committed_tokens)
+        decode_kv_page_ids = list(request.kv_page_ids)
+        kv_blocks_total = len(decode_kv_page_ids)
+        kv_blocks_selected = kv_blocks_total
+        estimated_kv_bytes_read = kv_blocks_total * self.kv_cache._bytes_per_page()
+        estimated_kv_bytes_saved = 0
+
+        if self.sparse_selector is not None:
+            selection = self.sparse_selector.select(request, self.kv_cache, decode_step)
+            if selection.page_ids:
+                decode_kv_page_ids = selection.page_ids
+            kv_blocks_total = selection.total_blocks
+            kv_blocks_selected = selection.selected_blocks
+            estimated_kv_bytes_read = selection.estimated_kv_bytes_read
+            estimated_kv_bytes_saved = selection.estimated_kv_bytes_saved
+
+        self.kv_cache.pin_pages(decode_kv_page_ids)
+        self.kv_cache.touch_pages(decode_kv_page_ids)
 
         effective_block_size = (
             request.current_block_size if self.adaptive_policy else self.block_size
         )
-        logits: TokenLogits = self.backend.decode_step(request, request.kv_page_ids)
+        logits: TokenLogits = self.backend.decode_step(request, decode_kv_page_ids)
         proposal = self.proposer.propose(request, block_size=effective_block_size)
         request.draft_tokens = list(proposal)
-        mask = self.verifier.verify(request, proposal, request.kv_page_ids, self.backend)
+        mask = self.verifier.verify(request, proposal, decode_kv_page_ids, self.backend)
         adaptive_proposal = list(proposal)
         adaptive_mask = mask
         accepted_tokens = proposal[: mask.accepted_count]
@@ -174,7 +193,7 @@ class DecodeWorker:
             used_fallback = True
             serial_proposal = self.proposer.propose(request, block_size=1)
             request.draft_tokens = list(serial_proposal)
-            mask = self.verifier.verify(request, serial_proposal, request.kv_page_ids, self.backend)
+            mask = self.verifier.verify(request, serial_proposal, decode_kv_page_ids, self.backend)
             accepted_tokens = serial_proposal[: mask.accepted_count]
             proposal = serial_proposal
 
@@ -214,7 +233,7 @@ class DecodeWorker:
             request.phase = RequestPhase.READY_DECODE
             request.was_preempted = True
             if not self.keep_ready_pinned:
-                self.kv_cache.unpin_pages(request.kv_page_ids)
+                self.kv_cache.unpin_pages(decode_kv_page_ids)
 
         if request.first_decode_ms is None:
             request.first_decode_ms = now_ms + backend_latency_ms
@@ -227,6 +246,11 @@ class DecodeWorker:
             used_fallback_serial=used_fallback,
             backend_latency_ms=backend_latency_ms,
             block_size_used=effective_block_size,
+            kv_blocks_total=kv_blocks_total,
+            kv_blocks_selected=kv_blocks_selected,
+            estimated_kv_bytes_read=estimated_kv_bytes_read,
+            estimated_kv_bytes_saved=estimated_kv_bytes_saved,
+            selected_kv_page_ids=list(decode_kv_page_ids),
         )
         self.stats.processed_requests += 1
         self.stats.backend_time_ms += backend_latency_ms
@@ -244,6 +268,7 @@ class WorkerPool:
         proposer: DraftBlockProposer,
         verifier: SpeculativeVerifier,
         adaptive_policy: AdaptiveBlockPolicy | None = None,
+        sparse_selector: SparseKVSelector | None = None,
     ) -> None:
         self.prefill_workers = [
             PrefillWorker(
@@ -264,6 +289,7 @@ class WorkerPool:
                 config.block_size,
                 adaptive_policy=adaptive_policy,
                 keep_ready_pinned=config.pin_ready_decode_pages,
+                sparse_selector=sparse_selector,
             )
             for idx in range(config.num_decode_workers)
         ]
@@ -329,6 +355,7 @@ class PersistentDecodeRuntime:
         backend: AbstractKernelBackend | None = None,
         kv_cache: KVCache | None = None,
         adaptive_policy: AdaptiveBlockPolicy | None = None,
+        sparse_selector: SparseKVSelector | None = None,
     ) -> None:
         self.config = config
         self.adaptive_policy = adaptive_policy
@@ -343,6 +370,9 @@ class PersistentDecodeRuntime:
             max_pages=config.max_pages,
             config=config,
         )
+        self.sparse_selector = sparse_selector
+        if self.sparse_selector is None and config.enable_sparse_kv:
+            self.sparse_selector = SparseKVSelector(config)
         self.worker_pool = WorkerPool(
             config=config,
             backend=self.backend,
@@ -350,6 +380,7 @@ class PersistentDecodeRuntime:
             proposer=self.proposer,
             verifier=self.verifier,
             adaptive_policy=self.adaptive_policy,
+            sparse_selector=self.sparse_selector,
         )
         self._virtual_time_ms = 0.0
         self._results: dict[int, list[DecodeStepTrace]] = {}
@@ -400,6 +431,10 @@ class PersistentDecodeRuntime:
         mean_bs = sum(hist) / len(hist) if hist else 0.0
         min_bs = min(hist) if hist else 0
         max_bs = max(hist) if hist else 0
+        total_kv_blocks = sum(trace.kv_blocks_total for trace in traces)
+        selected_kv_blocks = sum(trace.kv_blocks_selected for trace in traces)
+        bytes_read = sum(trace.estimated_kv_bytes_read for trace in traces)
+        bytes_saved = sum(trace.estimated_kv_bytes_saved for trace in traces)
 
         return DecodeResult(
             request_id=request.request_id,
@@ -414,4 +449,8 @@ class PersistentDecodeRuntime:
             min_block_size=min_bs,
             max_block_size=max_bs,
             rehydration_count=request.rehydration_count,
+            kv_blocks_total=total_kv_blocks,
+            kv_blocks_selected=selected_kv_blocks,
+            estimated_kv_bytes_read=bytes_read,
+            estimated_kv_bytes_saved=bytes_saved,
         )

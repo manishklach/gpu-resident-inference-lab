@@ -63,6 +63,11 @@ class DecodeStepTrace:
     used_fallback_serial: bool = False
     backend_latency_ms: float = 0.0
     block_size_used: int = 0
+    kv_blocks_total: int = 0
+    kv_blocks_selected: int = 0
+    estimated_kv_bytes_read: int = 0
+    estimated_kv_bytes_saved: int = 0
+    selected_kv_page_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -151,6 +156,10 @@ class DecodeResult:
     min_block_size: int = 0
     max_block_size: int = 0
     rehydration_count: int = 0
+    kv_blocks_total: int = 0
+    kv_blocks_selected: int = 0
+    estimated_kv_bytes_read: int = 0
+    estimated_kv_bytes_saved: int = 0
 
     @property
     def full_sequence(self) -> list[int]:

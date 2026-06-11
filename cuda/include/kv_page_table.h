@@ -17,6 +17,7 @@ enum KVPageFlags : int {
     KV_FLAG_COMMITTED  = 1 << 2,
     KV_FLAG_PINNED     = 1 << 3,
     KV_FLAG_EVICTABLE  = 1 << 4,
+    KV_FLAG_SELECTED   = 1 << 5,
 };
 
 struct KVPageEntry {
@@ -27,6 +28,10 @@ struct KVPageEntry {
     int token_count;
     int state;
     int flags;
+    float score;
+    int selected;
+    int last_selected_step;
+    int sparse_rank;
 
     __host__ __device__ bool has_flag(KVPageFlags f) const {
         return (flags & static_cast<int>(f)) != 0;
@@ -95,6 +100,25 @@ __device__ __forceinline__ void mark_page_pinned(KVPageEntry* entry) {
 
 __device__ __forceinline__ void mark_page_resident(KVPageEntry* entry) {
     entry->set_flag(KV_FLAG_RESIDENT);
+}
+
+__device__ __forceinline__ void clear_page_selected(KVPageEntry* entry) {
+    entry->selected = 0;
+    entry->sparse_rank = -1;
+    entry->clear_flag(KV_FLAG_SELECTED);
+}
+
+__device__ __forceinline__ void mark_page_selected(
+    KVPageEntry* entry,
+    float score,
+    int decode_step,
+    int rank
+) {
+    entry->score = score;
+    entry->selected = 1;
+    entry->last_selected_step = decode_step;
+    entry->sparse_rank = rank;
+    entry->set_flag(KV_FLAG_SELECTED);
 }
 
 #endif

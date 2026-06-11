@@ -18,6 +18,7 @@ EXPECTED_HEADERS = [
     "include/stage_spec_verify.cuh",
     "include/stage_commit.cuh",
     "include/stage_kv.cuh",
+    "include/stage_sparse_kv_select.cuh",
 ]
 
 EXPECTED_SOURCES = [

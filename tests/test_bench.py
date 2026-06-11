@@ -34,6 +34,12 @@ EXPECTED_COLUMNS = [
     "min_block_size",
     "max_block_size",
     "block_size_variance",
+    "kv_blocks_total",
+    "kv_blocks_selected",
+    "kv_sparsity_ratio",
+    "estimated_kv_bytes_read",
+    "estimated_kv_bytes_saved",
+    "tokens_per_resident_loop",
 ]
 
 
@@ -143,3 +149,16 @@ def test_benchmark_memory_metrics_non_negative() -> None:
     assert df.iloc[0]["pinned_kv_bytes"] >= 0
     assert df.iloc[0]["eviction_count"] >= 0
     assert 0.0 <= df.iloc[0]["fragmentation_ratio"] <= 1.0
+
+
+def test_sparse_kv_benchmark_mode_reports_sparse_metrics() -> None:
+    """Sparse KV mode should expose sparse-block accounting columns."""
+    runner = BenchmarkRunner(batch_sizes=[1], block_sizes=[2])
+    df = runner.run(modes=[BenchmarkMode.SPARSE_KV_MEGAKERNEL])
+
+    assert len(df) == 1
+    assert df.iloc[0]["mode"] == "sparse_kv_megakernel"
+    assert df.iloc[0]["kv_blocks_total"] >= df.iloc[0]["kv_blocks_selected"]
+    assert 0.0 <= df.iloc[0]["kv_sparsity_ratio"] <= 1.0
+    assert df.iloc[0]["estimated_kv_bytes_read"] >= 0
+    assert df.iloc[0]["estimated_kv_bytes_saved"] >= 0

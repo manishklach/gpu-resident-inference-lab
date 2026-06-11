@@ -40,6 +40,9 @@ class RuntimeConfig:
     head_dim: int = 64
     dtype_bytes: int = 2
     kv_tensors_per_token: int = 2
+    enable_sparse_kv: bool = False
+    sparse_top_k: int = 4
+    kv_block_size: int = 4
 
     def bytes_per_token_per_layer(self) -> int:
         """Bytes of KV storage for one token across one layer.

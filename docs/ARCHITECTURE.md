@@ -12,6 +12,7 @@ Build a persistent decode runtime that can eventually host a mega-kernel style e
 This repo now implements the full CPU-side Phase 1 architecture:
 
 - prefill workers
+- sparse KV block selection
 - decode workers
 - prefill-to-decode KV handoff
 - paged KV-cache planning
@@ -79,7 +80,22 @@ Each decode iteration is modeled as:
 
 This matches the key control pattern behind MTP / DFlash-style decoding.
 
-### 5. Backend Boundary
+### 5. MSA-Inspired Sparse KV Selection
+
+Before each logical decode step, the runtime can score the committed KV pages
+for one request, select a deterministic top-k subset, and pass only those
+selected blocks into the decode and verify calls.
+
+This is a control-flow and memory-scheduling scaffold only:
+
+- not MiniMax MSA
+- not FlashAttention
+- not production attention math
+
+The purpose is to model how a persistent decode kernel could reduce logical KV
+traffic by performing page/block selection inside the GPU-resident loop.
+
+### 6. Backend Boundary
 
 The simulator separates runtime logic from kernel logic.
 
@@ -91,6 +107,7 @@ Today:
 Later:
 
 - proposer can call fused CUDA kernels
+- sparse selection can route into real sparse attention kernels
 - verifier can call a large-model verify kernel
 - runtime can hand work to a persistent device scheduler
 
@@ -100,6 +117,7 @@ Later:
 
 - CPU worker specialization and handoff
 - paged KV-cache planning
+- sparse KV page selection
 - benchmarkable backend abstraction
 
 ### Phase 2

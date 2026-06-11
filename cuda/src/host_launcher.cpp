@@ -258,8 +258,16 @@ static RunMetrics run_megakernel_path(
     memset(kv_entries, 0, total_kv_entries * sizeof(KVPageEntry));
     for (int i = 0; i < total_kv_entries; i++) {
         kv_entries[i].page_id = i;
+        kv_entries[i].request_id = (i / 4) + 1;
+        kv_entries[i].layer_id = i % 2;
+        kv_entries[i].start_token = (i % 4) * 4;
+        kv_entries[i].token_count = 4;
         kv_entries[i].state = KV_PAGE_FREE;
         kv_entries[i].flags = 0;
+        kv_entries[i].score = 0.0f;
+        kv_entries[i].selected = 0;
+        kv_entries[i].last_selected_step = -1;
+        kv_entries[i].sparse_rank = -1;
     }
 
     KVPageEntry* d_kv_entries = nullptr;

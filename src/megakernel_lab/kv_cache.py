@@ -35,6 +35,10 @@ class KVPage:
     pinned: bool = False
     is_committed: bool = False
     is_draft: bool = False
+    score: float = 0.0
+    selected: bool = False
+    last_selected_step: int = -1
+    sparse_rank: int = -1
 
 
 class KVCache:
@@ -374,6 +378,18 @@ class KVCache:
     def page_ids_for(self, request_id: int, layer_id: int) -> list[int]:
         """Return the pages mapped to one request/layer pair."""
         return list(self._page_table.get((request_id, layer_id), []))
+
+    def pages_for_request(self, request_id: int) -> list[KVPage]:
+        """Return live pages associated with a request across layers."""
+        pages: list[KVPage] = []
+        for (req_id, _layer_id), page_ids in self._page_table.items():
+            if req_id != request_id:
+                continue
+            for page_id in page_ids:
+                page = self._pages.get(page_id)
+                if page is not None:
+                    pages.append(page)
+        return pages
 
     def has_snapshot(self, request: RequestState) -> bool:
         """Return whether every page referenced by the request snapshot is live."""
