@@ -62,6 +62,7 @@ class DecodeStepTrace:
     accepted_tokens: list[int]
     used_fallback_serial: bool = False
     backend_latency_ms: float = 0.0
+    block_size_used: int = 0
 
 
 @dataclass(slots=True)
@@ -86,6 +87,10 @@ class RequestState:
     prefill_complete_ms: float | None = None
     first_decode_ms: float | None = None
     last_decode_ms: float | None = None
+
+    ema_acceptance_rate: float = 0.80
+    current_block_size: int = 4
+    block_size_history: list[int] = field(default_factory=list)
 
     def remaining_target(self) -> list[int]:
         """Return the uncommitted portion of the target sequence."""
@@ -141,6 +146,9 @@ class DecodeResult:
     inter_token_latency_ms: list[float]
     acceptance_rate: float
     was_preempted: bool
+    mean_block_size: float = 0.0
+    min_block_size: int = 0
+    max_block_size: int = 0
 
     @property
     def full_sequence(self) -> list[int]:

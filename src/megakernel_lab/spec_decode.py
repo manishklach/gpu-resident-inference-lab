@@ -16,6 +16,54 @@ class AcceptancePolicy:
     reject_draft_blocks: bool = False
 
 
+@dataclass(slots=True)
+class AdaptiveBlockPolicy:
+    """Controls for Adaptive Speculative Block Sizing (ASBS).
+
+    Each request maintains an EMA of its observed acceptance rate.
+    This policy maps that rate to a block size for the next decode iteration.
+    """
+
+    min_block: int = 1
+    max_block: int = 8
+    alpha: float = 0.20
+    pressure_cap: int = 2
+    high_accept_threshold: float = 0.80
+    low_accept_threshold: float = 0.50
+
+
+def update_block_size(
+    request: RequestState,
+    mask: AcceptanceMask,
+    policy: AdaptiveBlockPolicy,
+    kv_pressure: bool,
+) -> None:
+    """Update the request's EMA acceptance rate and next block size.
+
+    Pure function — no side effects beyond mutating *request*.
+    """
+    proposed = max(len(mask.accepted), 1)
+    observed = mask.accepted_count / proposed
+
+    request.ema_acceptance_rate = (
+        policy.alpha * observed + (1.0 - policy.alpha) * request.ema_acceptance_rate
+    )
+
+    rate = request.ema_acceptance_rate
+    if rate >= policy.high_accept_threshold:
+        next_block = policy.max_block
+    elif rate >= policy.low_accept_threshold:
+        next_block = (policy.min_block + policy.max_block) // 2
+    else:
+        next_block = policy.min_block
+
+    if kv_pressure and next_block > policy.pressure_cap:
+        next_block = policy.pressure_cap
+
+    request.current_block_size = max(next_block, policy.min_block)
+    request.block_size_history.append(request.current_block_size)
+
+
 class DraftBlockProposer:
     """Produces a speculative block for the next decode iteration."""
 

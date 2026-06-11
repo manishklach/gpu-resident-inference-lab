@@ -26,6 +26,9 @@ struct RequestDescriptor {
 
     int error_code;
 
+    float ema_acceptance_rate;   // rolling EMA of acceptance rate (0.0 – 1.0)
+    int   current_block_size;    // per-request adaptive block size
+
     __host__ __device__ bool is_state(RequestState s) const {
         return state == static_cast<int>(s);
     }

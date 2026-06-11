@@ -23,7 +23,12 @@ from .block_runtime import BlockSpeculativeRuntime
 from .block_spec_decode import DFlashStyleDrafter
 from .config import RuntimeConfig
 from .runtime import PersistentDecodeRuntime
-from .spec_decode import AcceptancePolicy, DraftBlockProposer, SpeculativeVerifier
+from .spec_decode import (
+    AcceptancePolicy,
+    AdaptiveBlockPolicy,
+    DraftBlockProposer,
+    SpeculativeVerifier,
+)
 from .state import RequestState
 
 
@@ -76,6 +81,10 @@ class BenchmarkRecord:
     host_kernel_launches: int = 0
     host_synchronizations: int = 0
     simulated_tokens_per_iteration: float = 0.0
+    mean_block_size: float = 0.0
+    min_block_size: int = 0
+    max_block_size: int = 0
+    block_size_variance: float = 0.0
 
 
 class BenchmarkRunner:
@@ -174,6 +183,14 @@ class BenchmarkRunner:
                 sleep=False,
             )
         )
+        adaptive_policy = AdaptiveBlockPolicy(
+            min_block=1,
+            max_block=block_size,
+            alpha=0.20,
+            pressure_cap=2,
+            high_accept_threshold=0.80,
+            low_accept_threshold=0.50,
+        )
         runtime = PersistentDecodeRuntime(
             config=config,
             proposer=DraftBlockProposer(block_size=block_size, eos_token_id=config.eos_token_id),
@@ -184,6 +201,7 @@ class BenchmarkRunner:
                 )
             ),
             backend=backend,
+            adaptive_policy=adaptive_policy,
         )
         for request_id in range(batch_size):
             runtime.submit(
@@ -203,6 +221,15 @@ class BenchmarkRunner:
 
         acceptance_rate = sum(result.acceptance_rate for result in results) / len(results)
 
+        block_sizes = [r.mean_block_size for r in results]
+        mean_bs = sum(block_sizes) / len(block_sizes) if block_sizes else 0.0
+        min_bs = min(r.min_block_size for r in results) if results else 0
+        max_bs = max(r.max_block_size for r in results) if results else 0
+        if block_sizes:
+            variance = sum((x - mean_bs) ** 2 for x in block_sizes) / len(block_sizes)
+        else:
+            variance = 0.0
+
         return BenchmarkRecord(
             batch_size=batch_size,
             block_size=block_size,
@@ -217,6 +244,10 @@ class BenchmarkRunner:
             eviction_count=int(report["eviction_count"]),
             fragmentation_ratio=float(report["fragmentation_ratio"]),
             mode=mode.value,
+            mean_block_size=mean_bs,
+            min_block_size=min_bs,
+            max_block_size=max_bs,
+            block_size_variance=variance,
         )
 
     def _run_block_single(

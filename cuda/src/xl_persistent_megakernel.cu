@@ -56,7 +56,7 @@
  * @param shutdown_flag   Host/device flag; kernel exits when set
  * @param done_counter    Aggregate counter; each block incs once when done
  * @param max_iterations  Safety bound on the internal loop
- * @param block_size      Speculative block size for draft proposal
+ * @param initial_block_size  Starting block size; each request self-tunes via ASBS
  */
 
 #include <cuda_runtime.h>
@@ -76,17 +76,23 @@ __global__ void xl_persistent_megakernel(
     int* shutdown_flag,
     int* done_counter,
     int max_iterations,
-    int block_size
+    int initial_block_size
 ) {
     if (blockIdx.x >= num_requests) return;
 
     RequestDescriptor* req = &requests[blockIdx.x];
     bool already_counted = false;
+    bool asbs_initialized = false;
 
     for (int iteration = 0; !(*shutdown_flag) && iteration < max_iterations; iteration++) {
+        if (!asbs_initialized) {
+            req->ema_acceptance_rate = 0.80f;
+            req->current_block_size = initial_block_size > 0 ? initial_block_size : 4;
+            asbs_initialized = true;
+        }
         if (!req->is_done()) {
             stage_prefill(req, &kv_table);
-            stage_decode(req, draft_tokens, block_size);
+            stage_decode(req, draft_tokens);
             stage_spec_verify(req, draft_tokens);
             stage_commit(req, &kv_table);
         }

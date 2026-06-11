@@ -151,6 +151,8 @@ static void init_requests(RequestDescriptor* reqs, int n, int max_tokens, bool s
         reqs[i].kv_table_offset = i * 4;
         reqs[i].kv_num_pages = 4;
         reqs[i].error_code = 0;
+        reqs[i].ema_acceptance_rate = 0.80f;
+        reqs[i].current_block_size = 4;
     }
 }
 
@@ -243,6 +245,14 @@ static RunMetrics run_megakernel_path(
 
     RequestDescriptor* requests = new RequestDescriptor[N];
     init_requests(requests, N, tokens_per_request, true, draft_offset_stride);
+
+    // Set per-request adaptive block size from the configured draft_len
+    int init_block_size = draft_len > 0 ? draft_len : 4;
+    if (init_block_size > 8) init_block_size = 8;
+    if (init_block_size < 1) init_block_size = 1;
+    for (int i = 0; i < N; i++) {
+        requests[i].current_block_size = init_block_size;
+    }
 
     KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
     memset(kv_entries, 0, total_kv_entries * sizeof(KVPageEntry));

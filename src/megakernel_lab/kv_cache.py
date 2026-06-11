@@ -162,6 +162,15 @@ class KVCache:
             self._pinned_kv_bytes -= page_bytes
         self._eviction_count += 1
 
+    def is_under_pressure(self) -> bool:
+        """Return True if live page count exceeds 85% of max_pages.
+
+        Used by the adaptive block sizing policy to cap draft block size
+        when the KV cache is near capacity.
+        """
+        live = len(self._pages)
+        return live > self.max_pages * 0.85
+
     def ensure_capacity(self, request: RequestState, num_new_tokens: int) -> None:
         """Evict as needed and fail if the allocation still cannot fit."""
         needed = sum(

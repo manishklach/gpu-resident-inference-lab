@@ -5,13 +5,12 @@
 
 __device__ __forceinline__ void stage_decode(
     RequestDescriptor* req,
-    int* draft_tokens,
-    int block_size
+    int* draft_tokens
 ) {
     if (!req->is_state(REQUEST_DECODE_READY)) return;
 
     if (req->has_flag(REQUEST_FLAG_SPECULATIVE_ENABLED)) {
-        int count = block_size;
+        int count = req->current_block_size;
         int budget_left = req->max_new_tokens - req->output_token_count;
         if (count > budget_left) count = (budget_left > 0) ? budget_left : 0;
         req->draft_len = count;

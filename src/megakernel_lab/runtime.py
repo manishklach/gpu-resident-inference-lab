@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from .backend import AbstractKernelBackend, CPUStubBackend
 from .config import RuntimeConfig
 from .kv_cache import KVCache
-from .spec_decode import AcceptancePolicy, DraftBlockProposer, SpeculativeVerifier
+from .spec_decode import (
+    AcceptancePolicy,
+    AdaptiveBlockPolicy,
+    DraftBlockProposer,
+    SpeculativeVerifier,
+    update_block_size,
+)
 from .state import (
     DecodeResult,
     DecodeStepTrace,
@@ -97,6 +103,7 @@ class DecodeWorker:
         proposer: DraftBlockProposer,
         verifier: SpeculativeVerifier,
         block_size: int,
+        adaptive_policy: AdaptiveBlockPolicy | None = None,
     ) -> None:
         self.worker_id = worker_id
         self.backend = backend
@@ -104,6 +111,7 @@ class DecodeWorker:
         self.proposer = proposer
         self.verifier = verifier
         self.block_size = block_size
+        self.adaptive_policy = adaptive_policy
         self.stats = WorkerStats()
 
     def process(
@@ -114,8 +122,11 @@ class DecodeWorker:
         self.kv_cache.pin_pages(request.kv_page_ids)
         self.kv_cache.touch_request(request)
 
+        effective_block_size = (
+            request.current_block_size if self.adaptive_policy else self.block_size
+        )
         logits: TokenLogits = self.backend.decode_step(request, request.kv_page_ids)
-        proposal = self.proposer.propose(request, block_size=self.block_size)
+        proposal = self.proposer.propose(request, block_size=effective_block_size)
         request.draft_tokens = list(proposal)
         mask = self.verifier.verify(request, proposal, request.kv_page_ids, self.backend)
         accepted_tokens = proposal[: mask.accepted_count]
@@ -128,6 +139,10 @@ class DecodeWorker:
             mask = self.verifier.verify(request, serial_proposal, request.kv_page_ids, self.backend)
             accepted_tokens = serial_proposal[: mask.accepted_count]
             proposal = serial_proposal
+
+        if self.adaptive_policy:
+            kv_pressure = self.kv_cache.is_under_pressure()
+            update_block_size(request, mask, self.adaptive_policy, kv_pressure)
 
         if accepted_tokens:
             if not self.kv_cache.can_allocate(request, len(accepted_tokens)):
@@ -171,6 +186,7 @@ class DecodeWorker:
             accepted_tokens=list(accepted_tokens),
             used_fallback_serial=used_fallback,
             backend_latency_ms=backend_latency_ms,
+            block_size_used=effective_block_size,
         )
         self.stats.processed_requests += 1
         self.stats.backend_time_ms += backend_latency_ms
@@ -187,13 +203,22 @@ class WorkerPool:
         kv_cache: KVCache,
         proposer: DraftBlockProposer,
         verifier: SpeculativeVerifier,
+        adaptive_policy: AdaptiveBlockPolicy | None = None,
     ) -> None:
         self.prefill_workers = [
             PrefillWorker(f"prefill-{idx}", backend, kv_cache)
             for idx in range(config.num_prefill_workers)
         ]
         self.decode_workers = [
-            DecodeWorker(f"decode-{idx}", backend, kv_cache, proposer, verifier, config.block_size)
+            DecodeWorker(
+                f"decode-{idx}",
+                backend,
+                kv_cache,
+                proposer,
+                verifier,
+                config.block_size,
+                adaptive_policy=adaptive_policy,
+            )
             for idx in range(config.num_decode_workers)
         ]
         self.prefill_queue = _PriorityRequestQueue()
@@ -257,8 +282,10 @@ class PersistentDecodeRuntime:
         verifier: SpeculativeVerifier | None = None,
         backend: AbstractKernelBackend | None = None,
         kv_cache: KVCache | None = None,
+        adaptive_policy: AdaptiveBlockPolicy | None = None,
     ) -> None:
         self.config = config
+        self.adaptive_policy = adaptive_policy
         self.proposer = proposer or DraftBlockProposer(
             block_size=config.block_size,
             eos_token_id=config.eos_token_id,
@@ -276,6 +303,7 @@ class PersistentDecodeRuntime:
             kv_cache=self.kv_cache,
             proposer=self.proposer,
             verifier=self.verifier,
+            adaptive_policy=self.adaptive_policy,
         )
         self._virtual_time_ms = 0.0
         self._results: dict[int, list[DecodeStepTrace]] = {}
@@ -284,6 +312,10 @@ class PersistentDecodeRuntime:
         """Submit a request to the runtime."""
         if not request.layer_ids:
             request.layer_ids = list(range(self.config.num_layers))
+        if self.adaptive_policy:
+            request.current_block_size = self.config.block_size
+            request.ema_acceptance_rate = 0.80
+            request.block_size_history = [self.config.block_size]
         self.worker_pool.enqueue_prefill(request)
 
     def run(self) -> list[DecodeResult]:
@@ -317,6 +349,12 @@ class PersistentDecodeRuntime:
         inter_token_latency_ms = [
             trace.backend_latency_ms for trace in traces if trace.accepted_tokens
         ]
+
+        hist = request.block_size_history
+        mean_bs = sum(hist) / len(hist) if hist else 0.0
+        min_bs = min(hist) if hist else 0
+        max_bs = max(hist) if hist else 0
+
         return DecodeResult(
             request_id=request.request_id,
             prompt_tokens=list(request.prompt_tokens),
@@ -326,4 +364,7 @@ class PersistentDecodeRuntime:
             inter_token_latency_ms=inter_token_latency_ms,
             acceptance_rate=acceptance_rate,
             was_preempted=request.was_preempted,
+            mean_block_size=mean_bs,
+            min_block_size=min_bs,
+            max_block_size=max_bs,
         )

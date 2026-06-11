@@ -30,6 +30,10 @@ EXPECTED_COLUMNS = [
     "host_kernel_launches",
     "host_synchronizations",
     "simulated_tokens_per_iteration",
+    "mean_block_size",
+    "min_block_size",
+    "max_block_size",
+    "block_size_variance",
 ]
 
 
