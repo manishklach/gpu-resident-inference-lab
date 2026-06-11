@@ -60,10 +60,17 @@ class _PriorityRequestQueue:
 class PrefillWorker:
     """Consumes waiting requests and produces a KV snapshot."""
 
-    def __init__(self, worker_id: str, backend: AbstractKernelBackend, kv_cache: KVCache) -> None:
+    def __init__(
+        self,
+        worker_id: str,
+        backend: AbstractKernelBackend,
+        kv_cache: KVCache,
+        keep_ready_pinned: bool,
+    ) -> None:
         self.worker_id = worker_id
         self.backend = backend
         self.kv_cache = kv_cache
+        self.keep_ready_pinned = keep_ready_pinned
         self.stats = WorkerStats()
 
     def process(
@@ -72,7 +79,9 @@ class PrefillWorker:
         request.phase = RequestPhase.PREFILL
         total_tokens = len(request.prompt_tokens)
         layer_page_map = self.kv_cache.allocate_for_request(
-            request, total_tokens=total_tokens, pinned=True
+            request,
+            total_tokens=total_tokens,
+            pinned=self.keep_ready_pinned,
         )
         page_ids = [page_id for pages in layer_page_map.values() for page_id in pages]
         self.kv_cache.touch_pages(page_ids)
@@ -104,6 +113,7 @@ class DecodeWorker:
         verifier: SpeculativeVerifier,
         block_size: int,
         adaptive_policy: AdaptiveBlockPolicy | None = None,
+        keep_ready_pinned: bool = True,
     ) -> None:
         self.worker_id = worker_id
         self.backend = backend
@@ -112,13 +122,39 @@ class DecodeWorker:
         self.verifier = verifier
         self.block_size = block_size
         self.adaptive_policy = adaptive_policy
+        self.keep_ready_pinned = keep_ready_pinned
         self.stats = WorkerStats()
+
+    def _rehydrate_if_needed(self, request: RequestState) -> float:
+        """Rebuild KV residency if the request snapshot was evicted."""
+        if self.kv_cache.has_snapshot(request):
+            return 0.0
+
+        total_tokens = len(request.prompt_tokens) + len(request.committed_tokens)
+        full_sequence = request.full_sequence()
+        self.kv_cache.release_request(request.request_id)
+        layer_page_map = self.kv_cache.allocate_for_request(
+            request,
+            total_tokens=total_tokens,
+            pinned=True,
+        )
+        page_ids = [page_id for pages in layer_page_map.values() for page_id in pages]
+        snapshot = self.backend.prefill(full_sequence, page_ids)
+        request.kv_snapshot = KVSnapshot(
+            request_id=request.request_id,
+            layer_page_map=layer_page_map,
+            prompt_length=len(request.prompt_tokens),
+            latency_ms=snapshot.latency_ms,
+        )
+        request.rehydration_count += 1
+        return snapshot.latency_ms
 
     def process(
         self, request: RequestState, now_ms: float
     ) -> tuple[RequestState, DecodeStepTrace, float]:
         request.phase = RequestPhase.DECODE
         request.decode_worker_id = self.worker_id
+        rehydration_latency_ms = self._rehydrate_if_needed(request)
         self.kv_cache.pin_pages(request.kv_page_ids)
         self.kv_cache.touch_request(request)
 
@@ -162,7 +198,7 @@ class DecodeWorker:
                 latency_ms=request.kv_snapshot.latency_ms if request.kv_snapshot else 0.0,
             )
 
-        backend_latency_ms = logits.latency_ms + mask.latency_ms
+        backend_latency_ms = rehydration_latency_ms + logits.latency_ms + mask.latency_ms
         finish_request = (
             request.token_budget_left() == 0
             or (accepted_tokens and accepted_tokens[-1] == request.eos_token_id)
@@ -177,6 +213,8 @@ class DecodeWorker:
         else:
             request.phase = RequestPhase.READY_DECODE
             request.was_preempted = True
+            if not self.keep_ready_pinned:
+                self.kv_cache.unpin_pages(request.kv_page_ids)
 
         if request.first_decode_ms is None:
             request.first_decode_ms = now_ms + backend_latency_ms
@@ -208,7 +246,12 @@ class WorkerPool:
         adaptive_policy: AdaptiveBlockPolicy | None = None,
     ) -> None:
         self.prefill_workers = [
-            PrefillWorker(f"prefill-{idx}", backend, kv_cache)
+            PrefillWorker(
+                f"prefill-{idx}",
+                backend,
+                kv_cache,
+                keep_ready_pinned=config.pin_ready_decode_pages,
+            )
             for idx in range(config.num_prefill_workers)
         ]
         self.decode_workers = [
@@ -220,6 +263,7 @@ class WorkerPool:
                 verifier,
                 config.block_size,
                 adaptive_policy=adaptive_policy,
+                keep_ready_pinned=config.pin_ready_decode_pages,
             )
             for idx in range(config.num_decode_workers)
         ]
@@ -369,4 +413,5 @@ class PersistentDecodeRuntime:
             mean_block_size=mean_bs,
             min_block_size=min_bs,
             max_block_size=max_bs,
+            rehydration_count=request.rehydration_count,
         )

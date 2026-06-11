@@ -375,6 +375,15 @@ class KVCache:
         """Return the pages mapped to one request/layer pair."""
         return list(self._page_table.get((request_id, layer_id), []))
 
+    def has_snapshot(self, request: RequestState) -> bool:
+        """Return whether every page referenced by the request snapshot is live."""
+        if request.kv_snapshot is None:
+            return False
+        for page_id in request.kv_page_ids:
+            if page_id not in self._pages:
+                return False
+        return True
+
     def positions_for(self, request_id: int) -> list[int]:
         """Return token positions currently covered by the request's pages."""
         positions: list[int] = []

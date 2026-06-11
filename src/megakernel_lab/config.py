@@ -16,6 +16,9 @@ class RuntimeConfig:
         num_layers: Number of transformer layers (each gets its own KV pages).
         num_prefill_workers: Number of parallel prefill workers.
         num_decode_workers: Number of parallel decode workers.
+        pin_ready_decode_pages: Keep READY_DECODE request pages pinned between
+            decode iterations. If False, requests may need KV rehydration after
+            eviction before they resume.
         num_heads: Number of KV attention heads (for memory accounting).
         head_dim: Dimension per attention head (for memory accounting).
         dtype_bytes: Bytes per KV element (2 for fp16, 4 for fp32).
@@ -32,6 +35,7 @@ class RuntimeConfig:
     num_layers: int = 2
     num_prefill_workers: int = 1
     num_decode_workers: int = 1
+    pin_ready_decode_pages: bool = True
     num_heads: int = 12
     head_dim: int = 64
     dtype_bytes: int = 2

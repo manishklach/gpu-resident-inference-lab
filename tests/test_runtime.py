@@ -15,6 +15,7 @@ def make_runtime(
     max_pages: int = 32,
     num_prefill_workers: int = 1,
     num_decode_workers: int = 1,
+    pin_ready_decode_pages: bool = True,
 ) -> PersistentDecodeRuntime:
     """Build a test runtime."""
     config = RuntimeConfig(
@@ -26,6 +27,7 @@ def make_runtime(
         num_layers=2,
         num_prefill_workers=num_prefill_workers,
         num_decode_workers=num_decode_workers,
+        pin_ready_decode_pages=pin_ready_decode_pages,
     )
     return PersistentDecodeRuntime(
         config=config,
@@ -173,3 +175,54 @@ def test_ready_decode_requests_keep_kv_residency_under_pressure() -> None:
     for idx, request in enumerate(requests):
         assert results[request.request_id].committed_tokens == [70 + idx, 71 + idx, 72 + idx, 0]
     assert runtime.kv_cache.residency_report()["eviction_count"] == 0
+
+
+def test_evicted_ready_decode_request_is_rehydrated_on_resume() -> None:
+    class CountingBackend(CPUStubBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prefill_calls = 0
+
+        def prefill(self, token_ids: list[int], kv_pages: list[int]):
+            self.prefill_calls += 1
+            return super().prefill(token_ids, kv_pages)
+
+    backend = CountingBackend()
+    config = RuntimeConfig(
+        block_size=2,
+        max_new_tokens=8,
+        eos_token_id=0,
+        page_size=2,
+        max_pages=6,
+        num_layers=2,
+        num_prefill_workers=1,
+        num_decode_workers=1,
+        pin_ready_decode_pages=False,
+    )
+    runtime = PersistentDecodeRuntime(
+        config=config,
+        proposer=DraftBlockProposer(block_size=2, eos_token_id=config.eos_token_id),
+        verifier=SpeculativeVerifier(AcceptancePolicy()),
+        backend=backend,
+    )
+    requests = [
+        RequestState(
+            request_id=200 + idx,
+            prompt_tokens=[1, 2],
+            target_tokens=[80 + idx, 81 + idx, 0],
+            max_new_tokens=8,
+            eos_token_id=0,
+            priority=idx,
+            layer_ids=[0, 1],
+        )
+        for idx in range(2)
+    ]
+    for request in requests:
+        runtime.submit(request)
+
+    results = {result.request_id: result for result in runtime.run()}
+
+    for idx, request in enumerate(requests):
+        assert results[request.request_id].committed_tokens == [80 + idx, 81 + idx, 0]
+    assert any(result.rehydration_count > 0 for result in results.values())
+    assert backend.prefill_calls > len(requests)

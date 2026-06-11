@@ -87,6 +87,7 @@ class RequestState:
     prefill_complete_ms: float | None = None
     first_decode_ms: float | None = None
     last_decode_ms: float | None = None
+    rehydration_count: int = 0
 
     ema_acceptance_rate: float = 0.80
     current_block_size: int = 4
@@ -149,6 +150,7 @@ class DecodeResult:
     mean_block_size: float = 0.0
     min_block_size: int = 0
     max_block_size: int = 0
+    rehydration_count: int = 0
 
     @property
     def full_sequence(self) -> list[int]:
