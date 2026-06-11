@@ -133,3 +133,39 @@ class TestASBS:
         assert len(result.traces) > 0
         for trace in result.traces:
             assert trace.block_size_used > 0
+
+    def test_asbs_learns_from_rejected_speculative_block_not_serial_fallback(self) -> None:
+        config = RuntimeConfig(
+            block_size=4,
+            max_new_tokens=8,
+            eos_token_id=0,
+            page_size=4,
+            max_pages=64,
+            num_layers=2,
+            num_prefill_workers=1,
+            num_decode_workers=1,
+        )
+        backend = CPUStubBackend(BackendLatencyConfig(sleep=False))
+        adaptive = AdaptiveBlockPolicy(
+            min_block=1,
+            max_block=4,
+            alpha=0.20,
+            pressure_cap=2,
+            high_accept_threshold=0.80,
+            low_accept_threshold=0.50,
+        )
+        runtime = PersistentDecodeRuntime(
+            config=config,
+            backend=backend,
+            adaptive_policy=adaptive,
+            verifier=None,
+        )
+        runtime.verifier.policy.reject_draft_blocks = True
+        req = _make_request(request_id=1, max_new_tokens=8)
+        runtime.submit(req)
+        result = runtime.run()[0]
+
+        assert any(trace.used_fallback_serial for trace in result.traces)
+        assert result.traces[0].block_size_used == 4
+        assert max(trace.block_size_used for trace in result.traces[1:]) <= 2
+        assert req.current_block_size <= 2

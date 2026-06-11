@@ -72,7 +72,7 @@ class PrefillWorker:
         request.phase = RequestPhase.PREFILL
         total_tokens = len(request.prompt_tokens)
         layer_page_map = self.kv_cache.allocate_for_request(
-            request, total_tokens=total_tokens, pinned=False
+            request, total_tokens=total_tokens, pinned=True
         )
         page_ids = [page_id for pages in layer_page_map.values() for page_id in pages]
         self.kv_cache.touch_pages(page_ids)
@@ -129,6 +129,8 @@ class DecodeWorker:
         proposal = self.proposer.propose(request, block_size=effective_block_size)
         request.draft_tokens = list(proposal)
         mask = self.verifier.verify(request, proposal, request.kv_page_ids, self.backend)
+        adaptive_proposal = list(proposal)
+        adaptive_mask = mask
         accepted_tokens = proposal[: mask.accepted_count]
         used_fallback = False
 
@@ -142,7 +144,7 @@ class DecodeWorker:
 
         if self.adaptive_policy:
             kv_pressure = self.kv_cache.is_under_pressure()
-            update_block_size(request, mask, self.adaptive_policy, kv_pressure)
+            update_block_size(request, adaptive_mask, self.adaptive_policy, kv_pressure)
 
         if accepted_tokens:
             if not self.kv_cache.can_allocate(request, len(accepted_tokens)):
@@ -350,7 +352,7 @@ class PersistentDecodeRuntime:
             trace.backend_latency_ms for trace in traces if trace.accepted_tokens
         ]
 
-        hist = request.block_size_history
+        hist = [trace.block_size_used for trace in traces if trace.block_size_used > 0]
         mean_bs = sum(hist) / len(hist) if hist else 0.0
         min_bs = min(hist) if hist else 0
         max_bs = max(hist) if hist else 0

@@ -144,3 +144,32 @@ def test_worker_handoff_preserves_page_ownership() -> None:
     assert handoff.prefill_worker_id.startswith("prefill-")
     assert handoff.decode_worker_id.startswith("decode-")
     assert handoff.page_ids
+
+
+def test_ready_decode_requests_keep_kv_residency_under_pressure() -> None:
+    runtime = make_runtime(
+        block_size=2,
+        max_pages=12,
+        num_prefill_workers=1,
+        num_decode_workers=1,
+    )
+    requests = [
+        RequestState(
+            request_id=100 + idx,
+            prompt_tokens=[1, 2, 3],
+            target_tokens=[70 + idx, 71 + idx, 72 + idx, 0],
+            max_new_tokens=8,
+            eos_token_id=0,
+            priority=idx,
+            layer_ids=[0, 1],
+        )
+        for idx in range(2)
+    ]
+    for request in requests:
+        runtime.submit(request)
+
+    results = {result.request_id: result for result in runtime.run()}
+
+    for idx, request in enumerate(requests):
+        assert results[request.request_id].committed_tokens == [70 + idx, 71 + idx, 72 + idx, 0]
+    assert runtime.kv_cache.residency_report()["eviction_count"] == 0
