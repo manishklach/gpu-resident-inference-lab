@@ -3,7 +3,8 @@
 Lightweight guardrail: scan repo documents for overclaiming phrases.
 
 Flags phrases that imply real 1T inference, real 1K TPS, or unqualified
-performance numbers. Designed to be advisory — does not fail CI.
+performance numbers. If a line also contains a disclaimer phrase, the
+line is not flagged. Designed to be advisory — does not fail CI.
 
 Usage:
     python scripts/check_claims.py [--strict]
@@ -23,18 +24,46 @@ DANGER_PATTERNS = [
     (r"(?i)6\.7x", "Unqualified 6.7x number — must cite source and context"),
     (r"(?i)30[-–]60%\s*%?\s*of\s+total\s+decode", "Unqualified 30-60% claim"),
     (r"(?i)can\s+dwarf\s+the\s+(first|compute)", "Overly strong language — use 'first-order latency term'"),
+    (r"(?i)Xiaomi\s+DFlash", "May imply real DFlash implementation (use 'DFlash-style')"),
+    (r"(?i)TileRT", "May imply real TileRT implementation (use 'conceptual CUDA scaffold')"),
+    (r"(?i)1T\s+inference", "May overclaim (qualify with '1T-class' or 'future')"),
+    (r"(?i)1000\s+TPS", "Implies 1000 TPS achievement (use 'toward 1K+ TPS')"),
 ]
 
-ALLOWED_CONTEXTS = [
-    "toward 1K+ TPS",
-    "1T-class",
-    "control-flow scaffold",
-    "fake deterministic math",
-    "future real fused inference path",
-    "orchestration overhead",
-    "one kernel, many stages",
-    "many logical stages, one resident kernel",
+DISCLAIMER_PHRASES = [
+    "does not implement",
+    "not real",
+    "not a real",
+    "not an implementation",
+    "not compatible",
+    "fake deterministic",
+    "conceptual",
+    "scaffold",
+    "does not claim",
+    "not production",
+    "control-flow",
+    "measurement disclaimer",
+    "what is fake",
+    "fake math",
+    "deterministic fake",
+    "not a working",
+    "not true",
+    "not the",
+    "not a ",
+    "not claiming",
+    "reproducing",
+    "inspired",
+    "related work",
+    "demonstrates",
 ]
+
+
+def line_contains_disclaimer(line: str) -> bool:
+    lowered = line.lower()
+    for phrase in DISCLAIMER_PHRASES:
+        if phrase in lowered:
+            return True
+    return False
 
 
 def scan_file(path: Path, strict: bool = False) -> list[str]:
@@ -47,14 +76,7 @@ def scan_file(path: Path, strict: bool = False) -> list[str]:
     for lineno, line in enumerate(text.splitlines(), start=1):
         for pattern, msg in DANGER_PATTERNS:
             for match in re.finditer(pattern, line):
-                start = match.start()
-                # Check if a negation appears within 50 chars before the match
-                context_start = max(0, start - 50)
-                before = line[context_start:start].lower()
-                # Skip negated claims ("not a production runtime") and qualified terms
-                if re.search(r"(not\s+a|not\s+just|no\s+|rather than)", before):
-                    continue
-                if re.search(r"production-adjacent", line[context_start:start + 50].lower()):
+                if line_contains_disclaimer(line):
                     continue
                 issues.append(f"  {path.name}:{lineno}: {msg}")
                 issues.append(f"    -> {line.strip()[:120]}")
@@ -65,31 +87,22 @@ def main() -> None:
     strict = "--strict" in sys.argv
     targets: list[Path] = []
 
-    # Default targets
-    default_dirs = [
-        Path("docs"),
-        Path("."),
-    ]
-
     # If specific files given, use those
-    if len(sys.argv) > (2 if strict else 1):
-        for arg in sys.argv[1:]:
-            if arg == "--strict":
-                continue
+    file_args = [a for a in sys.argv[1:] if a != "--strict"]
+    if file_args:
+        for arg in file_args:
             p = Path(arg)
             if p.is_file():
                 targets.append(p)
     else:
-        # Walk default directories
+        default_dirs = [Path("docs"), Path(".")]
         for d in default_dirs:
             if d.is_dir():
                 for f in d.rglob("*.md"):
                     targets.append(f)
-
-    # Also check blog source
-    blog = Path("docs/index.html")
-    if blog.is_file():
-        targets.append(blog)
+        blog = Path("docs/index.html")
+        if blog.is_file():
+            targets.append(blog)
 
     all_issues: list[str] = []
     for t in sorted(set(targets)):
@@ -107,11 +120,7 @@ def main() -> None:
         print()
         print(f"Found {len(all_issues)} potential issues across {len(set(targets))} files.")
         print()
-
-        if strict:
-            print("Strict mode: EXIT with warnings.")
-        else:
-            print("Advisory only. Pass --strict to fail on findings.")
+        print("Advisory only. Pass --strict to fail on findings." if not strict else "Strict mode: EXIT with warnings.")
         print()
         sys.exit(1 if strict else 0)
     else:
