@@ -361,6 +361,7 @@ Additional files:
 - [`cuda/examples/warp_specialized_block_pipeline_sketch.cu`](cuda/examples/warp_specialized_block_pipeline_sketch.cu) — conceptual sketch: warp-group roles for load, dequantize, compute, verify, commit, schedule
 - [`src/megakernel_lab/block_spec_decode.py`](src/megakernel_lab/block_spec_decode.py) — DFlash-style drafter simulator (fake math)
 - [`src/megakernel_lab/block_runtime.py`](src/megakernel_lab/block_runtime.py) — block speculative runtime: draft → verify → commit → update loop
+- [Adaptive Speculative Block Sizing (ASBS) for XL-Persistent-Kernel](https://manishklach.github.io/writings/adaptive-speculative-block-sizing-xl-persistent-kernel.html) — blog post explaining the adaptive block sizing path and why it matters for persistent speculative decode
 - [`src/megakernel_lab/swa_state.py`](src/megakernel_lab/swa_state.py) — SWA window state model with read/write counters
 - [`src/megakernel_lab/token_state.py`](src/megakernel_lab/token_state.py) — token lifecycle: draft, accept, commit, reject, resample
 - [`examples/block_speculative_demo.py`](examples/block_speculative_demo.py) — runnable comparison of serial, block-spec, and persistent control
