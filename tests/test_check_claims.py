@@ -2,10 +2,11 @@
 
 from scripts.check_claims import line_contains_disclaimer
 
-
 # Lines that should NOT be flagged because they contain disclaimers
 SAFE_LINES = [
-    "This repo models these ideas with fake deterministic math and lifecycle counters. It does not implement Xiaomi DFlash, TileRT, or real transformer inference.",
+    "This repo models these ideas with fake deterministic math and "
+    "lifecycle counters. It does not implement Xiaomi DFlash, TileRT, "
+    "or real transformer inference.",
     "It does not implement Xiaomi DFlash or real transformer inference.",
     "This is a conceptual sketch, not real TileRT.",
     "This is not a real DFlash implementation.",
@@ -35,8 +36,10 @@ RISKY_LINES = [
 class TestClaimChecker:
     def test_safe_lines_have_disclaimer(self) -> None:
         for line in SAFE_LINES:
-            assert line_contains_disclaimer(line), f"'{line[:60]}...' should be recognized as having a disclaimer"
+            msg = f"'{line[:60]}...' should have a disclaimer"
+            assert line_contains_disclaimer(line), msg
 
     def test_risky_lines_lack_disclaimer(self) -> None:
         for line in RISKY_LINES:
-            assert not line_contains_disclaimer(line), f"'{line[:60]}...' should not have a disclaimer detected"
+            msg = f"'{line[:60]}...' should lack disclaimer"
+            assert not line_contains_disclaimer(line), msg
