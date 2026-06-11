@@ -4,8 +4,12 @@ from megakernel_lab.backend import CPUStubBackend
 from megakernel_lab.config import RuntimeConfig
 from megakernel_lab.kv_cache import KVCache
 from megakernel_lab.runtime import DecodeWorker
-from megakernel_lab.spec_decode import AcceptancePolicy, DraftBlockProposer, SpeculativeVerifier
 from megakernel_lab.sparse_kv import SparseKVSelector
+from megakernel_lab.spec_decode import (
+    AcceptancePolicy,
+    DraftBlockProposer,
+    SpeculativeVerifier,
+)
 from megakernel_lab.state import KVSnapshot, RequestState
 
 
@@ -99,9 +103,7 @@ def test_released_draft_pages_are_not_selected() -> None:
     cache.commit_tokens(request, num_new_tokens=0, pin=False)
     cache.allocate_draft_pages(request, num_new_tokens=4)
     draft_ids = {
-        page.page_id
-        for page in cache.pages_for_request(request.request_id)
-        if page.is_draft
+        page.page_id for page in cache.pages_for_request(request.request_id) if page.is_draft
     }
     assert draft_ids
 

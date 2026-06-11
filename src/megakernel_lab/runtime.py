@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from .backend import AbstractKernelBackend, CPUStubBackend
 from .config import RuntimeConfig
 from .kv_cache import KVCache
+from .sparse_kv import SparseKVSelector
 from .spec_decode import (
     AcceptancePolicy,
     AdaptiveBlockPolicy,
@@ -15,7 +16,6 @@ from .spec_decode import (
     SpeculativeVerifier,
     update_block_size,
 )
-from .sparse_kv import SparseKVSelector
 from .state import (
     DecodeResult,
     DecodeStepTrace,
@@ -184,7 +184,6 @@ class DecodeWorker:
         proposal = self.proposer.propose(request, block_size=effective_block_size)
         request.draft_tokens = list(proposal)
         mask = self.verifier.verify(request, proposal, decode_kv_page_ids, self.backend)
-        adaptive_proposal = list(proposal)
         adaptive_mask = mask
         accepted_tokens = proposal[: mask.accepted_count]
         used_fallback = False

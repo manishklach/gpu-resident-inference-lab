@@ -66,9 +66,7 @@ class SparseKVSelector:
             page.last_selected_step = decode_step
             page.sparse_rank = rank
 
-        bytes_per_page = (
-            self.config.kv_block_size * self.config.bytes_per_token_per_layer()
-        )
+        bytes_per_page = self.config.kv_block_size * self.config.bytes_per_token_per_layer()
         total_blocks = len(active_pages)
         selected_blocks = len(selected_pages)
         estimated_read = selected_blocks * bytes_per_page
