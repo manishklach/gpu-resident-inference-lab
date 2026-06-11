@@ -19,6 +19,8 @@ from pathlib import Path
 import pandas as pd
 
 from .backend import BackendLatencyConfig, CPUStubBackend
+from .block_runtime import BlockSpeculativeRuntime
+from .block_spec_decode import DFlashStyleDrafter
 from .config import RuntimeConfig
 from .runtime import PersistentDecodeRuntime
 from .spec_decode import AcceptancePolicy, DraftBlockProposer, SpeculativeVerifier
@@ -39,6 +41,11 @@ class BenchmarkMode(str, Enum):
     KV_PRESSURE = "kv_pressure"
     MEGA_KERNEL_SIM = "mega_kernel_sim"
 
+    AUTOREGRESSIVE_SERIAL = "autoregressive_serial"
+    BLOCK_SPECULATIVE = "block_speculative"
+    BLOCK_SPECULATIVE_PERSISTENT_SIM = "block_speculative_persistent_sim"
+    BLOCK_SPECULATIVE_HOST_ORCHESTRATED = "block_speculative_host_orchestrated"
+
 
 @dataclass(slots=True)
 class BenchmarkRecord:
@@ -57,6 +64,18 @@ class BenchmarkRecord:
     eviction_count: int
     fragmentation_ratio: float
     mode: str
+
+    iterations: int = 0
+    draft_blocks: int = 0
+    total_draft_tokens: int = 0
+    accepted_tokens_block: int = 0
+    rejected_tokens: int = 0
+    average_accepted_prefix_len: float = 0.0
+    state_reads: int = 0
+    state_writes: int = 0
+    host_kernel_launches: int = 0
+    host_synchronizations: int = 0
+    simulated_tokens_per_iteration: float = 0.0
 
 
 class BenchmarkRunner:
@@ -200,6 +219,94 @@ class BenchmarkRunner:
             mode=mode.value,
         )
 
+    def _run_block_single(
+        self,
+        batch_size: int,
+        block_size: int,
+        window_size: int,
+        mode: BenchmarkMode,
+        max_new_tokens: int = 64,
+    ) -> BenchmarkRecord:
+        drafter = DFlashStyleDrafter(
+            block_size=block_size,
+            window_size=window_size,
+        )
+        runtime = BlockSpeculativeRuntime(drafter=drafter)
+
+        if mode == BenchmarkMode.AUTOREGRESSIVE_SERIAL:
+            drafter.block_size = 1
+        if mode == BenchmarkMode.BLOCK_SPECULATIVE_PERSISTENT_SIM:
+            pass
+        if mode == BenchmarkMode.BLOCK_SPECULATIVE_HOST_ORCHESTRATED:
+            pass
+
+        total_accepted = 0
+        total_iterations = 0
+        total_draft_blocks = 0
+        total_draft_tokens = 0
+        total_rejected = 0
+        total_state_reads = 0
+        total_state_writes = 0
+
+        for _ in range(batch_size):
+            runtime.token_state.committed_tokens = []
+            runtime.token_state.current_position = 0
+            runtime.swa.total_state_reads = 0
+            runtime.swa.total_state_writes = 0
+            metrics = runtime.run(max_new_tokens=max_new_tokens)
+            total_accepted += metrics.accepted_tokens
+            total_iterations += metrics.iterations
+            total_draft_blocks += metrics.draft_blocks
+            total_draft_tokens += metrics.total_draft_tokens
+            total_rejected += metrics.rejected_tokens
+            total_state_reads += metrics.state_reads
+            total_state_writes += metrics.state_writes
+
+        avg_acc_prefix = 0.0
+        if total_draft_blocks > 0:
+            avg_acc_prefix = total_accepted / total_draft_blocks
+        num_total = total_accepted + total_rejected
+        acceptance_rate = total_accepted / num_total if num_total > 0 else 0.0
+
+        if mode == BenchmarkMode.BLOCK_SPECULATIVE_PERSISTENT_SIM:
+            launches = 1
+            syncs = 1
+        elif mode == BenchmarkMode.BLOCK_SPECULATIVE_HOST_ORCHESTRATED:
+            launches = total_iterations * 4
+            syncs = total_iterations * 4
+        else:
+            launches = total_iterations
+            syncs = total_iterations
+
+        tokens_per_iter = total_accepted / total_iterations if total_iterations > 0 else 0.0
+
+        return BenchmarkRecord(
+            batch_size=batch_size,
+            block_size=block_size,
+            mean_ttft_ms=0.0,
+            p50_itl_ms=0.0,
+            p95_itl_ms=0.0,
+            p99_itl_ms=0.0,
+            acceptance_rate=acceptance_rate,
+            kv_hit_rate=0.0,
+            live_kv_bytes=0,
+            pinned_kv_bytes=0,
+            eviction_count=0,
+            fragmentation_ratio=0.0,
+            mode=mode.value,
+            iterations=total_iterations,
+            draft_blocks=total_draft_blocks,
+            total_draft_tokens=total_draft_tokens,
+            accepted_tokens_block=total_accepted,
+            rejected_tokens=total_rejected,
+            average_accepted_prefix_len=avg_acc_prefix,
+            state_reads=total_state_reads,
+            state_writes=total_state_writes,
+            host_kernel_launches=launches,
+            host_synchronizations=syncs,
+            simulated_tokens_per_iteration=tokens_per_iter,
+        )
+
     def run(self, modes: list[BenchmarkMode] | None = None) -> pd.DataFrame:
         """Execute the sweep and return a dataframe.
 
@@ -209,13 +316,27 @@ class BenchmarkRunner:
         active_modes = modes or self.modes
         records: list[BenchmarkRecord] = []
         for mode in active_modes:
-            for batch_size in self.batch_sizes:
-                effective_block_sizes = (
-                    [1] if mode == BenchmarkMode.SERIAL_DECODE else self.block_sizes
-                )
-                for block_size in effective_block_sizes:
-                    record = self._run_single(batch_size, block_size, mode)
-                    records.append(record)
+            if mode in (
+                BenchmarkMode.AUTOREGRESSIVE_SERIAL,
+                BenchmarkMode.BLOCK_SPECULATIVE,
+                BenchmarkMode.BLOCK_SPECULATIVE_PERSISTENT_SIM,
+                BenchmarkMode.BLOCK_SPECULATIVE_HOST_ORCHESTRATED,
+            ):
+                for batch_size in self.batch_sizes:
+                    effective_block_sizes = (
+                        [1] if mode == BenchmarkMode.AUTOREGRESSIVE_SERIAL else self.block_sizes
+                    )
+                    for block_size in effective_block_sizes:
+                        record = self._run_block_single(batch_size, block_size, 256, mode)
+                        records.append(record)
+            else:
+                for batch_size in self.batch_sizes:
+                    effective_block_sizes = (
+                        [1] if mode == BenchmarkMode.SERIAL_DECODE else self.block_sizes
+                    )
+                    for block_size in effective_block_sizes:
+                        record = self._run_single(batch_size, block_size, mode)
+                        records.append(record)
 
         df = pd.DataFrame(asdict(record) for record in records)
         results_dir = Path("results")

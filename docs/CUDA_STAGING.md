@@ -398,6 +398,8 @@ Key upcoming phases:
 
 - **Phase 2B**: Measured orchestration overhead (CUDA event timing, launch/sync counters, CSV export, make cuda-bench) — **in progress**.
 - **Phase 2C**: NVTX / profiler visibility (NVTX ranges around baseline loop and mega-kernel launch, Nsight Systems trace documentation) — **planned**.
+- **Phase 2D**: Block speculative decode model (DFlash-style drafter, token lifecycle, SWA window, block runtime, benchmark modes) — **in progress**.
+- **Phase 2E**: Warp-specialized persistent pipeline sketch (load, dequantize, compute, verify, commit, schedule warp groups) — **in progress**.
 - **Phase 3**: Real fused decode/verify path with real attention, projection, sampling, KV tensors, block verification, continuous batching — **planned**.
 - **Phase 4**: Dynamic request admission via device queues, continuous batching — **planned**.
 - **Phase 5**: Multi-GPU tensor parallelism, NVLink communication overlap — **planned**.
@@ -428,6 +430,73 @@ See [`cuda/examples/diffusion_refinement_megakernel_sketch.cu`](../cuda/examples
 
 ---
 
+---
+
+## Where Are Tokens, KV Cache, and SWA?
+
+The persistent pipeline has multiple data streams that flow through the GPU-resident loop:
+
+### Data Streams
+
+| Stream | Content | Producer | Consumer |
+|--------|---------|----------|----------|
+| Token stream | committed tokens, draft tokens, accepted tokens | decode / verify stages | commit / output stages |
+| Weight / expert tile stream | FP4-quantized model weights or MoE expert tiles | HBM / prefetch stage | dequantize / compute stages |
+| KV-or-state / SWA window stream | sliding-window context (last N tokens) | SWA read stage | drafter stage |
+| Control metadata stream | request descriptors, page table entries, done flags | scheduler / host | all stages |
+
+### GPU Data Layout (Conceptual)
+
+```
+GPU HBM:
+  ┌─────────────────────────────────────┐
+  │ model weights / expert weights      │  ← FP4 tiles
+  │ token buffers (committed)           │  ← accepted output
+  │ draft buffers                       │  ← temporary, per-iteration
+  │ committed token buffers             │  ← finalized tokens
+  │ KV-or-state / SWA window metadata   │  ← sliding window state
+  │ request descriptors                 │  ← per-request control
+  └─────────────────────────────────────┘
+
+Persistent kernel (on-device loop):
+  ┌─────────────────────────────────────┐
+  │ load/prefetch raw tiles             │  Warp group A
+  │ prepare/dequantize tiles            │  Warp group B
+  │ compute block                       │  Warp group C
+  │ verify/commit tokens                │  Warp group D
+  │ update state                        │  Warp group E
+  │ schedule next block                 │
+  └─────────────────────────────────────┘
+```
+
+### Token Lifecycle in the Block-Speculative Pipeline
+
+1. **Draft tokens** are proposed by the drafter (DFlash-style). They are temporary — held in a draft buffer, not yet committed.
+2. **Accepted prefix** is committed to the committed token buffer and the KV-or-state is updated.
+3. **Rejected tail** is discarded or (optionally) resampled in the next iteration.
+4. **SWA reads** only the recent window of committed tokens — never the full prefix.
+5. **KV-or-state is updated after commit**, not when drafts are merely proposed. This prevents state pollution from speculative tokens that are later rejected.
+
+This lifecycle is captured in [`src/megakernel_lab/token_state.py`](../src/megakernel_lab/token_state.py) and exercised by [`src/megakernel_lab/block_runtime.py`](../src/megakernel_lab/block_runtime.py).
+
+---
+
+## Warp-Specialized Persistent Pipeline Sketch
+
+The file [`cuda/examples/warp_specialized_block_pipeline_sketch.cu`](../cuda/examples/warp_specialized_block_pipeline_sketch.cu) is a conceptual sketch showing how a persistent mega-kernel could organize block speculative decoding using warp-specialized roles:
+
+| Warp group | Role | Operations |
+|-----------|------|------------|
+| A | Load / Prefetch | FP4 weight tiles, scale metadata, activation tiles, SWA/KV window |
+| B | Dequantize | Unpack FP4 tiles, prepare Tensor-Core-friendly format |
+| C | Compute | Run block compute — draft generation or verification scores |
+| D | Verify / Commit | Commit accepted tokens, discard rejected tail, update output |
+| E | Schedule | Coordinate pipeline state, schedule next request/block |
+
+> This sketch is not real TileRT, not real DFlash, and not real transformer math. It is a runtime-control model exploring how warp specialization maps onto the persistent mega-kernel thesis.
+
+---
+
 ## Directory Structure
 
 ```
@@ -451,6 +520,7 @@ cuda/
 
   examples/
     diffusion_refinement_megakernel_sketch.cu - Conceptual sketch: diffusion-style loop
+    warp_specialized_block_pipeline_sketch.cu - Conceptual sketch: warp-specialized block spec
 
   CMakeLists.txt           - Builds xlpk_cuda_smoke executable
 ```

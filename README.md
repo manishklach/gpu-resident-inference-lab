@@ -192,6 +192,10 @@ src/megakernel_lab/
     backend.py          - Abstract kernel backend + CPU stub
     bench.py            - Benchmark harness with CSV export
     demo.py             - Runnable demo comparing decode modes
+    block_spec_decode.py - DFlash-style block drafter and verifier
+    block_runtime.py    - Block speculative runtime loop
+    swa_state.py        - Sliding-window attention state model
+    token_state.py      - Token lifecycle: draft, accept, commit, reject
 
 cuda/
     include/            - CUDA headers + stage helpers (.cuh)
@@ -212,11 +216,19 @@ cuda/
     CMakeLists.txt      - Builds xlpk_cuda_smoke executable
 
 cuda/examples/
-    diffusion_refinement_megakernel_sketch.cu - Conceptual sketch: diffusion-style persistent kernel
+    diffusion_refinement_megakernel_sketch.cu     - Diffusion-style persistent kernel sketch
+    warp_specialized_block_pipeline_sketch.cu      - Warp-specialized block speculative sketch
+
+examples/
+    block_speculative_demo.py                      - Block speculative decode comparison demo
 
 tests/
-    test_runtime.py     - Runtime and worker tests
-    test_kv_cache.py    - KV cache allocation, eviction, memory accounting
+    test_runtime.py                - Runtime and worker tests
+    test_kv_cache.py               - KV cache allocation, eviction, memory accounting
+    test_block_spec_decode.py      - DFlash-style block drafter and verifier
+    test_token_state.py            - Token lifecycle: draft, accept, commit, reject
+    test_swa_state.py              - Sliding-window state with read/write counters
+    test_block_runtime.py          - Block speculative runtime loop
     test_spec_kv.py     - Speculative KV page lifecycle tests
     test_bench.py       - Benchmark schema validation
 
@@ -284,6 +296,52 @@ while (!*shutdown && !r->done) {
 > **This sketch is not an implementation of DiffusionGemma. It is a systems-level mapping of the persistent mega-kernel idea to diffusion-style token refinement. All math is fake/deterministic.**
 
 📖 [**Full blog post: Diffusion-Style Token Refinement on a Persistent Mega-Kernel**](https://manishklach.github.io/XL-Persistent-Kernel/diffusion-sketch.html) — stage-by-stage breakdown, autoregressive comparison table, and design rationale.
+
+## Why Speculative Decoding Makes Persistent Kernels More Valuable
+
+If decode is strictly one token at a time, a persistent kernel mainly reduces host launch and synchronization overhead. Useful, but limited.
+
+Once the runtime proposes a **block** of draft tokens in parallel, the persistent kernel has much more useful work to keep resident:
+
+- load next tile (weights, activations, KV window)
+- dequantize FP4 tiles
+- compute current block
+- verify draft tokens
+- commit accepted tokens
+- update KV-or-state metadata
+- prefetch next block
+
+**Key equation:**
+
+| Technique | What it solves |
+|-----------|---------------|
+| FP4 quantization | reduces model weight bytes and bandwidth pressure |
+| DFlash-style drafting | proposes multiple candidate tokens in parallel |
+| Sliding-window attention (SWA) | limits drafter state dependency to a fixed-size window |
+| Persistent mega-kernel | keeps draft/verify/commit/state-update pipeline resident on GPU |
+
+**Relationship:**
+
+> Speculative decoding creates block-level parallel work.  
+> The persistent kernel keeps that block-level workflow resident and flowing.
+
+This repo models these ideas with fake deterministic math and lifecycle counters. It does not implement Xiaomi DFlash, TileRT, or real transformer inference.
+
+Additional files:
+
+- [`cuda/examples/warp_specialized_block_pipeline_sketch.cu`](cuda/examples/warp_specialized_block_pipeline_sketch.cu) — conceptual sketch: warp-group roles for load, dequantize, compute, verify, commit, schedule
+- [`src/megakernel_lab/block_spec_decode.py`](src/megakernel_lab/block_spec_decode.py) — DFlash-style drafter simulator (fake math)
+- [`src/megakernel_lab/block_runtime.py`](src/megakernel_lab/block_runtime.py) — block speculative runtime: draft → verify → commit → update loop
+- [`src/megakernel_lab/swa_state.py`](src/megakernel_lab/swa_state.py) — SWA window state model with read/write counters
+- [`src/megakernel_lab/token_state.py`](src/megakernel_lab/token_state.py) — token lifecycle: draft, accept, commit, reject, resample
+- [`examples/block_speculative_demo.py`](examples/block_speculative_demo.py) — runnable comparison of serial, block-spec, and persistent control
+
+| Benchmark mode | Description |
+|---------------|-------------|
+| `autoregressive_serial` | one token committed per iteration |
+| `block_speculative` | DFlash-style block drafting and verification |
+| `block_speculative_persistent_sim` | block spec with `host_kernel_launches = 1` |
+| `block_speculative_host_orchestrated` | block spec with launch/sync per stage |
 
 ## Measurement: Host-Launched Decode vs Persistent Mega-Kernel
 

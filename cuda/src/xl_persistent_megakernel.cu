@@ -15,6 +15,23 @@
  *     sets shutdown_flag when all requests complete. This avoids the race
  *     from a block-0 linear scan without a memory fence.
  *
+ * Why block-level generation makes this kernel more valuable:
+ *   If generation is strictly one token at a time, the persistent kernel
+ *   mainly saves launch/sync overhead — useful, but limited.
+ *
+ *   With speculative or diffusion-style block decoding, the kernel has a
+ *   richer internal pipeline:
+ *     load next tile
+ *     dequantize (FP4)
+ *     compute current block
+ *     verify draft tokens
+ *     commit accepted tokens
+ *     update KV/SWA/state
+ *     prefetch next block
+ *
+ *   Speculative decoding creates block-level work; the persistent
+ *   mega-kernel keeps that work resident and flowing on GPU.
+ *
  * Current status:
  *   - All math is fake/deterministic (control-flow scaffold only).
  *   - No real transformer attention, projection, or sampling.
@@ -29,6 +46,8 @@
  * Future:
  *   - Real fused inference pipeline with real attention/decode kernels,
  *     KV tensors, and speculative verification.
+ *   - Warp-specialized roles: load/dequantize/compute/verify/commit
+ *     across warp groups (see cuda/examples/warp_specialized_block_pipeline_sketch.cu).
  *
  * @param requests        Array of request descriptors (device memory)
  * @param num_requests    Number of request descriptors

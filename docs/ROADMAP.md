@@ -67,6 +67,33 @@ Add NVTX annotations for profiler-based visualization of the control-flow differ
 - Document expected trace shape: many small ranges (baseline) vs one large range (mega-kernel)
 - Profiler-backed latency analysis to complement CUDA event timing
 
+## Phase 2D: Block Speculative Decode Model
+
+**In progress**
+
+A Python model of DFlash-style block speculative decoding, showing how block-level generation creates the internal pipeline work that makes persistent kernels more valuable.
+
+- `DFlashStyleDrafter` — proposes blocks of draft tokens using deterministic fake math
+- `TokenState` — explicit token lifecycle: draft, accept, commit, reject, resample
+- `SlidingWindowState` — SWA-inspired KV/state window with read/write counters
+- `BlockSpeculativeRuntime` — block-level runtime loop: draft → verify → commit → update
+- Benchmark modes: `autoregressive_serial`, `block_speculative`, `block_speculative_persistent_sim`, `block_speculative_host_orchestrated`
+- CSV columns: iterations, draft_blocks, accepted/rejected tokens, acceptance rate, state reads/writes, host launches, host syncs
+- `examples/block_speculative_demo.py` — runnable comparison
+
+**Key insight:** Speculative decoding creates block-level work; the persistent mega-kernel keeps that work resident and flowing on GPU.
+
+## Phase 2E: Warp-Specialized Persistent Pipeline Sketch
+
+**In progress**
+
+A conceptual CUDA sketch showing how warp specialization maps onto the persistent mega-kernel for block speculative decode.
+
+- `cuda/examples/warp_specialized_block_pipeline_sketch.cu`
+- Warp group roles: load/prefetch, dequantize (FP4), compute block, verify/commit, schedule
+- Declared as conceptual only — not real TileRT, not real DFlash
+- Does not compile by default
+
 ## Phase 3: Real Fused Decode/Verify Kernels
 
 **Planned**
