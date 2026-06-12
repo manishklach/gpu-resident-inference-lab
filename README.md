@@ -141,6 +141,9 @@ That is the central systems point behind this repo. Persistent execution matters
 - Persistent execution scaffold in both Python simulation and CUDA staging
 - Sparse KV block selection path with deterministic top-k selection
 - DMA-aware KV movement planning over sparse-selected pages
+- Tier-aware KV staging plan that orders selected pages for resident decode
+- KV pressure and draft-first eviction scaffold for resident memory reclamation
+- Hierarchical KV tier rebalance across HBM, DRAM, and SSD budgets
 - Speculative/token-parallel workflow scaffolding
 - KV lifecycle tracking across committed, draft, selected, and released states
 - Benchmark harness for control-flow and memory-accounting experiments
@@ -200,12 +203,23 @@ These are stage helpers for one resident control-flow prototype. They are not a 
 
 The host launcher also exposes standalone research-kernel benchmark modes for:
 
+- resident scheduler ordering
 - sparse KV gather and score
+- KV prefetch planning
 - fused verify plus commit
 - DMA-aware KV movement planning
+- tiered KV staging
+- KV pressure eviction
+- KV tier residency rebalance
 - resident sparse decode pipeline
 
 The DMA-aware planner is still deliberately narrow in scope: it models how sparse-selected pages would be classified as HBM hits or DRAM/SSD fetches before decode consumes the compact working set. It does not implement real async copy, TMA, tier allocators, or production paging logic.
+
+The tiered staging kernel builds one step on top of that: it reorders selected pages so HBM-resident blocks are staged first, followed by DRAM and SSD-backed fetches, and assigns a simple double-buffer slot pattern for the resident path. This is still metadata-only scheduling, not real overlap or transport execution.
+
+The KV pressure kernel models the next control problem after staging: reclaiming memory when the resident working set gets too large. It applies a deterministic draft-first eviction policy, skips pinned and currently selected pages, and emits reclaimed-byte accounting. This is still not a real allocator or full cache manager.
+
+The KV tier residency kernel sits between staging and eviction: it promotes sparse-selected pages upward through the tier hierarchy and demotes colder non-selected pages when per-request HBM and DRAM budgets are exceeded. This models residency policy and tier pressure, not real migration overlap or globally coordinated cache management.
 
 ## Measurement: Host-Launched Decode vs Persistent Loop
 
@@ -286,13 +300,13 @@ Current:
 
 Next:
 
-- [ ] KV prefetch planning
-- [ ] Multi-request scheduling
-- [ ] Hierarchical KV tiers
-- [ ] HBM / DRAM / SSD simulation
+- [x] Multi-request scheduling
+- [x] KV prefetch planning
+- [x] Hierarchical KV tiers
+- [x] HBM / DRAM / SSD simulation
 - [x] DMA-aware KV movement model
+- [x] Memory pressure simulation
 - [ ] Trace-driven replay
-- [ ] Memory pressure simulation
 - [ ] Visualization of KV block selection
 - [ ] Benchmark report generation
 

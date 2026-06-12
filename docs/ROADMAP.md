@@ -122,6 +122,42 @@ Model how sparse-selected KV pages would be sourced into the resident decode pat
 - Host launcher mode: `--mode dma-movement`
 - Explicitly a research planner, not real async copy or production paging logic
 
+## Phase 2G: Tiered KV Staging Order
+
+**In progress**
+
+Add a staging pass that consumes selected pages and tier classifications, then emits an ordered resident working set for decode.
+
+- `cuda/src/tiered_kv_staging_kernel.cu`
+- Prioritize HBM-resident pages before DRAM and SSD-backed pages
+- Emit staging-order and double-buffer-slot metadata
+- Host launcher modes: `--mode resident-scheduler`, `--mode kv-prefetch`, `--mode tiered-kv-staging`
+- Still metadata-only; no real async transport, overlap, or queue-driven residency engine
+
+## Phase 2H: KV Pressure and Eviction
+
+**In progress**
+
+Model resident KV pressure handling once sparse selection and tier-aware staging have already consumed capacity.
+
+- `cuda/src/kv_pressure_eviction_kernel.cu`
+- Draft-first eviction policy with pinned-page and selected-page protection
+- Reclaimed-byte accounting and per-request eviction metrics
+- Host launcher mode: `--mode kv-pressure`
+- Still metadata-only; not a real allocator, LRU heap, or global cache manager
+
+## Phase 2I: Hierarchical KV Tier Residency
+
+**In progress**
+
+Model the residency policy that sits between staging and eviction: which pages should be promoted upward and which cold pages should be demoted when fast-tier budgets are tight.
+
+- `cuda/src/kv_tier_residency_kernel.cu`
+- One-step promotions for sparse-selected pages and budget-driven demotions for non-selected pages
+- Per-request HBM / DRAM / SSD final residency accounting
+- Host launcher mode: `--mode tier-residency`
+- Still metadata-only; not a globally coordinated residency manager or real migration engine
+
 ## Phase 3: Real Fused Decode/Verify Kernels
 
 **Planned**

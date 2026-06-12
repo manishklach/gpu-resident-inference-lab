@@ -120,6 +120,38 @@ extern __global__ void dma_aware_kv_movement_planner_kernel(
     DMAMovementPlanMetrics* metrics
 );
 
+extern __global__ void tiered_kv_staging_kernel(
+    const int* selected_page_ids,
+    const int* source_tiers,
+    int num_requests,
+    int max_selected_pages,
+    int bytes_per_page,
+    int* staged_page_ids,
+    int* staged_source_tiers,
+    int* staged_buffer_slots,
+    TieredKVStagingMetrics* metrics
+);
+
+extern __global__ void kv_pressure_eviction_kernel(
+    KVPageTable kv_table,
+    int num_requests,
+    int pages_per_request,
+    int eviction_budget_pages,
+    KVEvictionMetrics* metrics
+);
+
+extern __global__ void kv_tier_residency_kernel(
+    const int* selected_page_ids,
+    int num_requests,
+    int max_selected_pages,
+    int pages_per_request,
+    int hbm_capacity_pages,
+    int dram_capacity_pages,
+    int bytes_per_page,
+    int* page_tiers,
+    KVTierResidencyMetrics* metrics
+);
+
 extern __global__ void compacted_sparse_decode_kernel(
     RequestDescriptor* requests,
     int num_requests,
@@ -191,6 +223,28 @@ struct ResearchRunMetrics {
     int dma_bytes_from_hbm;
     int dma_bytes_from_dram;
     int dma_bytes_from_ssd;
+    int staged_pages;
+    int staged_hbm_pages;
+    int staged_dma_pages;
+    int buffer_slot_switches;
+    int staging_bytes;
+    int eviction_pages_scanned;
+    int eviction_pages_evicted;
+    int eviction_draft_pages;
+    int eviction_committed_pages;
+    int eviction_pinned_skipped;
+    int eviction_selected_skipped;
+    int eviction_reclaimed_bytes;
+    int tier_pages_rebalanced;
+    int tier_promotions_to_hbm;
+    int tier_promotions_to_dram;
+    int tier_demotions_to_dram;
+    int tier_demotions_to_ssd;
+    int tier_final_hbm_pages;
+    int tier_final_dram_pages;
+    int tier_final_ssd_pages;
+    int tier_bytes_promoted;
+    int tier_bytes_demoted;
     int generated_tokens;
     int loop_iterations;
 };
@@ -591,6 +645,179 @@ static ResearchRunMetrics run_sparse_gather_bench(int N, int draft_len) {
     return m;
 }
 
+static ResearchRunMetrics run_scheduler_bench(int N, int draft_len) {
+    ResearchRunMetrics m = {};
+    m.mode = "resident_scheduler";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].priority = ((i * 17) + 3) % (N + 7);
+        if ((i % 5) == 0) {
+            requests[i].set_state(REQUEST_COMPLETE);
+        }
+    }
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+    int* d_scheduled_ids = nullptr;
+    int* d_scheduled_priorities = nullptr;
+    SchedulerKernelMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_scheduled_ids, N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_scheduled_priorities, N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_metrics, sizeof(SchedulerKernelMetrics)));
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    resident_schedule_requests_kernel<<<1, 1>>>(
+        d_reqs,
+        N,
+        d_scheduled_ids,
+        d_scheduled_priorities,
+        d_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    SchedulerKernelMetrics h_metric = {};
+    CUDA_CHECK(cudaMemcpy(&h_metric, d_metrics, sizeof(SchedulerKernelMetrics), cudaMemcpyDeviceToHost));
+    m.scheduler_requests_examined = h_metric.requests_examined;
+    m.scheduler_requests_scheduled = h_metric.requests_scheduled;
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_scheduled_ids));
+    CUDA_CHECK(cudaFree(d_scheduled_priorities));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] requests;
+    return m;
+}
+
+static ResearchRunMetrics run_prefetch_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 4;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "kv_prefetch";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    const int bytes_per_page = ints_per_page * static_cast<int>(sizeof(int));
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        bytes_per_page,
+        &d_kv_entries
+    );
+
+    const int payload_count = total_kv_entries * ints_per_page;
+    int* h_payloads = new int[payload_count];
+    for (int i = 0; i < payload_count; ++i) {
+        h_payloads[i] = i + 1;
+    }
+
+    int* d_payloads = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_payloads, payload_count * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_payloads, h_payloads, payload_count * sizeof(int), cudaMemcpyHostToDevice));
+
+    const int max_selected_pages = draft_len > 0 ? draft_len : 2;
+    int* d_selected_page_ids = nullptr;
+    int* d_compacted_payloads = nullptr;
+    SparseKVGatherMetrics* d_gather_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_selected_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_compacted_payloads, N * max_selected_pages * ints_per_page * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gather_metrics, N * sizeof(SparseKVGatherMetrics)));
+
+    int* d_prefetched_page_ids = nullptr;
+    int* d_buffer_slots = nullptr;
+    KVPrefetchMetrics* d_prefetch_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_prefetched_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_buffer_slots, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_prefetch_metrics, N * sizeof(KVPrefetchMetrics)));
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    sparse_kv_gather_and_score_kernel<<<N, 1>>>(
+        d_reqs,
+        N,
+        kv_table,
+        d_payloads,
+        ints_per_page,
+        max_selected_pages,
+        d_selected_page_ids,
+        d_compacted_payloads,
+        d_gather_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    kv_prefetch_planner_kernel<<<N, 1>>>(
+        d_selected_page_ids,
+        N,
+        max_selected_pages,
+        bytes_per_page,
+        d_prefetched_page_ids,
+        d_buffer_slots,
+        d_prefetch_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    KVPrefetchMetrics* h_metrics = new KVPrefetchMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_metrics, d_prefetch_metrics, N * sizeof(KVPrefetchMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.prefetch_pages += h_metrics[i].prefetch_pages;
+        m.prefetch_bytes += h_metrics[i].prefetch_bytes;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_payloads));
+    CUDA_CHECK(cudaFree(d_selected_page_ids));
+    CUDA_CHECK(cudaFree(d_compacted_payloads));
+    CUDA_CHECK(cudaFree(d_gather_metrics));
+    CUDA_CHECK(cudaFree(d_prefetched_page_ids));
+    CUDA_CHECK(cudaFree(d_buffer_slots));
+    CUDA_CHECK(cudaFree(d_prefetch_metrics));
+    delete[] h_metrics;
+    delete[] h_payloads;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
 static ResearchRunMetrics run_verify_commit_bench(int N, int draft_len) {
     constexpr int pages_per_request = 4;
     constexpr int page_size_tokens = 4;
@@ -830,6 +1057,403 @@ static ResearchRunMetrics run_dma_movement_bench(int N, int draft_len) {
     return m;
 }
 
+static ResearchRunMetrics run_tiered_staging_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 4;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "tiered_kv_staging";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    const int bytes_per_page = ints_per_page * static_cast<int>(sizeof(int));
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        bytes_per_page,
+        &d_kv_entries
+    );
+
+    const int payload_count = total_kv_entries * ints_per_page;
+    int* h_payloads = new int[payload_count];
+    for (int i = 0; i < payload_count; ++i) {
+        h_payloads[i] = i + 1;
+    }
+
+    int* d_payloads = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_payloads, payload_count * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_payloads, h_payloads, payload_count * sizeof(int), cudaMemcpyHostToDevice));
+
+    const int max_selected_pages = draft_len > 0 ? draft_len : 2;
+    int* d_selected_page_ids = nullptr;
+    int* d_compacted_payloads = nullptr;
+    SparseKVGatherMetrics* d_gather_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_selected_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_compacted_payloads, N * max_selected_pages * ints_per_page * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gather_metrics, N * sizeof(SparseKVGatherMetrics)));
+
+    int* d_source_tiers = nullptr;
+    int* d_dma_ops = nullptr;
+    DMAMovementPlanMetrics* d_dma_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_source_tiers, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_dma_ops, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_dma_metrics, N * sizeof(DMAMovementPlanMetrics)));
+
+    int* d_staged_page_ids = nullptr;
+    int* d_staged_source_tiers = nullptr;
+    int* d_staged_buffer_slots = nullptr;
+    TieredKVStagingMetrics* d_staging_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_staged_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_staged_source_tiers, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_staged_buffer_slots, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_staging_metrics, N * sizeof(TieredKVStagingMetrics)));
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    sparse_kv_gather_and_score_kernel<<<N, 1>>>(
+        d_reqs,
+        N,
+        kv_table,
+        d_payloads,
+        ints_per_page,
+        max_selected_pages,
+        d_selected_page_ids,
+        d_compacted_payloads,
+        d_gather_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    dma_aware_kv_movement_planner_kernel<<<N, 1>>>(
+        d_selected_page_ids,
+        N,
+        max_selected_pages,
+        bytes_per_page,
+        d_source_tiers,
+        d_dma_ops,
+        d_dma_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    tiered_kv_staging_kernel<<<N, 1>>>(
+        d_selected_page_ids,
+        d_source_tiers,
+        N,
+        max_selected_pages,
+        bytes_per_page,
+        d_staged_page_ids,
+        d_staged_source_tiers,
+        d_staged_buffer_slots,
+        d_staging_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    DMAMovementPlanMetrics* h_dma_metrics = new DMAMovementPlanMetrics[N];
+    TieredKVStagingMetrics* h_staging_metrics = new TieredKVStagingMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_dma_metrics, d_dma_metrics, N * sizeof(DMAMovementPlanMetrics), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_staging_metrics, d_staging_metrics, N * sizeof(TieredKVStagingMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.dma_pages_planned += h_dma_metrics[i].pages_planned;
+        m.dma_hbm_hits += h_dma_metrics[i].hbm_hits;
+        m.dma_dram_fetches += h_dma_metrics[i].dram_fetches;
+        m.dma_ssd_fetches += h_dma_metrics[i].ssd_fetches;
+        m.dma_ops += h_dma_metrics[i].dma_ops;
+        m.dma_bytes_moved += h_dma_metrics[i].bytes_moved;
+        m.dma_bytes_from_hbm += h_dma_metrics[i].bytes_from_hbm;
+        m.dma_bytes_from_dram += h_dma_metrics[i].bytes_from_dram;
+        m.dma_bytes_from_ssd += h_dma_metrics[i].bytes_from_ssd;
+        m.staged_pages += h_staging_metrics[i].staged_pages;
+        m.staged_hbm_pages += h_staging_metrics[i].hbm_pages_staged;
+        m.staged_dma_pages += h_staging_metrics[i].dma_pages_staged;
+        m.buffer_slot_switches += h_staging_metrics[i].buffer_slot_switches;
+        m.staging_bytes += h_staging_metrics[i].staging_bytes;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_payloads));
+    CUDA_CHECK(cudaFree(d_selected_page_ids));
+    CUDA_CHECK(cudaFree(d_compacted_payloads));
+    CUDA_CHECK(cudaFree(d_gather_metrics));
+    CUDA_CHECK(cudaFree(d_source_tiers));
+    CUDA_CHECK(cudaFree(d_dma_ops));
+    CUDA_CHECK(cudaFree(d_dma_metrics));
+    CUDA_CHECK(cudaFree(d_staged_page_ids));
+    CUDA_CHECK(cudaFree(d_staged_source_tiers));
+    CUDA_CHECK(cudaFree(d_staged_buffer_slots));
+    CUDA_CHECK(cudaFree(d_staging_metrics));
+    delete[] h_dma_metrics;
+    delete[] h_staging_metrics;
+    delete[] h_payloads;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
+static ResearchRunMetrics run_kv_pressure_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 6;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "kv_pressure";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED
+    );
+
+    for (int req = 0; req < N; ++req) {
+        const int base = req * pages_per_request;
+        // Two pinned hot pages survive pressure.
+        kv_entries[base + 0].set_state(KV_PAGE_PINNED);
+        kv_entries[base + 0].set_flag(KV_FLAG_PINNED);
+        kv_entries[base + 1].set_state(KV_PAGE_PINNED);
+        kv_entries[base + 1].set_flag(KV_FLAG_PINNED);
+
+        // Two draft pages should be evicted first.
+        kv_entries[base + 2].set_state(KV_PAGE_DRAFT);
+        kv_entries[base + 2].set_flag(KV_FLAG_DRAFT);
+        kv_entries[base + 2].clear_flag(KV_FLAG_COMMITTED);
+        kv_entries[base + 3].set_state(KV_PAGE_DRAFT);
+        kv_entries[base + 3].set_flag(KV_FLAG_DRAFT);
+        kv_entries[base + 3].clear_flag(KV_FLAG_COMMITTED);
+
+        // One selected page should be skipped.
+        kv_entries[base + 4].selected = 1;
+        kv_entries[base + 4].sparse_rank = 0;
+        kv_entries[base + 4].set_flag(KV_FLAG_SELECTED);
+
+        // Final committed page is a fallback eviction target.
+        kv_entries[base + 5].set_state(KV_PAGE_COMMITTED);
+        kv_entries[base + 5].set_flag(KV_FLAG_COMMITTED);
+    }
+
+    KVPageEntry* d_kv_entries = nullptr;
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        ints_per_page * static_cast<int>(sizeof(int)),
+        &d_kv_entries
+    );
+
+    KVEvictionMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_metrics, N * sizeof(KVEvictionMetrics)));
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    kv_pressure_eviction_kernel<<<N, 1>>>(
+        kv_table,
+        N,
+        pages_per_request,
+        3,
+        d_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    KVEvictionMetrics* h_metrics = new KVEvictionMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_metrics, d_metrics, N * sizeof(KVEvictionMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.eviction_pages_scanned += h_metrics[i].pages_scanned;
+        m.eviction_pages_evicted += h_metrics[i].pages_evicted;
+        m.eviction_draft_pages += h_metrics[i].draft_pages_evicted;
+        m.eviction_committed_pages += h_metrics[i].committed_pages_evicted;
+        m.eviction_pinned_skipped += h_metrics[i].pinned_pages_skipped;
+        m.eviction_selected_skipped += h_metrics[i].selected_pages_skipped;
+        m.eviction_reclaimed_bytes += h_metrics[i].reclaimed_bytes;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] h_metrics;
+    delete[] kv_entries;
+    return m;
+}
+
+static ResearchRunMetrics run_tier_residency_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 6;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "kv_tier_residency";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+        requests[i].kv_num_pages = pages_per_request;
+        requests[i].kv_table_offset = i * pages_per_request;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    const int bytes_per_page = ints_per_page * static_cast<int>(sizeof(int));
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        bytes_per_page,
+        &d_kv_entries
+    );
+
+    const int payload_count = total_kv_entries * ints_per_page;
+    int* h_payloads = new int[payload_count];
+    for (int i = 0; i < payload_count; ++i) {
+        h_payloads[i] = i + 1;
+    }
+
+    int* d_payloads = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_payloads, payload_count * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_payloads, h_payloads, payload_count * sizeof(int), cudaMemcpyHostToDevice));
+
+    const int max_selected_pages = draft_len > 0 ? draft_len : 2;
+    int* d_selected_page_ids = nullptr;
+    int* d_compacted_payloads = nullptr;
+    SparseKVGatherMetrics* d_gather_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_selected_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_compacted_payloads, N * max_selected_pages * ints_per_page * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gather_metrics, N * sizeof(SparseKVGatherMetrics)));
+
+    int* h_page_tiers = new int[total_kv_entries];
+    for (int req = 0; req < N; ++req) {
+        const int base = req * pages_per_request;
+        h_page_tiers[base + 0] = 0;
+        h_page_tiers[base + 1] = 0;
+        h_page_tiers[base + 2] = 1;
+        h_page_tiers[base + 3] = 1;
+        h_page_tiers[base + 4] = 2;
+        h_page_tiers[base + 5] = 2;
+    }
+
+    int* d_page_tiers = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_page_tiers, total_kv_entries * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_page_tiers, h_page_tiers, total_kv_entries * sizeof(int), cudaMemcpyHostToDevice));
+
+    KVTierResidencyMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_metrics, N * sizeof(KVTierResidencyMetrics)));
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    sparse_kv_gather_and_score_kernel<<<N, 1>>>(
+        d_reqs,
+        N,
+        kv_table,
+        d_payloads,
+        ints_per_page,
+        max_selected_pages,
+        d_selected_page_ids,
+        d_compacted_payloads,
+        d_gather_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    kv_tier_residency_kernel<<<N, 1>>>(
+        d_selected_page_ids,
+        N,
+        max_selected_pages,
+        pages_per_request,
+        2,
+        2,
+        bytes_per_page,
+        d_page_tiers,
+        d_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    KVTierResidencyMetrics* h_metrics = new KVTierResidencyMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_metrics, d_metrics, N * sizeof(KVTierResidencyMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.tier_pages_rebalanced += h_metrics[i].pages_rebalanced;
+        m.tier_promotions_to_hbm += h_metrics[i].promotions_to_hbm;
+        m.tier_promotions_to_dram += h_metrics[i].promotions_to_dram;
+        m.tier_demotions_to_dram += h_metrics[i].demotions_to_dram;
+        m.tier_demotions_to_ssd += h_metrics[i].demotions_to_ssd;
+        m.tier_final_hbm_pages += h_metrics[i].final_hbm_pages;
+        m.tier_final_dram_pages += h_metrics[i].final_dram_pages;
+        m.tier_final_ssd_pages += h_metrics[i].final_ssd_pages;
+        m.tier_bytes_promoted += h_metrics[i].bytes_promoted;
+        m.tier_bytes_demoted += h_metrics[i].bytes_demoted;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_payloads));
+    CUDA_CHECK(cudaFree(d_selected_page_ids));
+    CUDA_CHECK(cudaFree(d_compacted_payloads));
+    CUDA_CHECK(cudaFree(d_gather_metrics));
+    CUDA_CHECK(cudaFree(d_page_tiers));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] h_metrics;
+    delete[] h_page_tiers;
+    delete[] h_payloads;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
 static ResearchRunMetrics run_research_pipeline_bench(int N, int draft_len, int max_iterations) {
     constexpr int pages_per_request = 4;
     constexpr int page_size_tokens = 4;
@@ -985,6 +1609,34 @@ static void print_research_metrics(const ResearchRunMetrics& m) {
         printf("  dma_bytes_from_dram: %d\n", m.dma_bytes_from_dram);
         printf("  dma_bytes_from_ssd: %d\n", m.dma_bytes_from_ssd);
     }
+    if (m.staged_pages > 0 || m.staging_bytes > 0) {
+        printf("  staged_pages: %d\n", m.staged_pages);
+        printf("  staged_hbm_pages: %d\n", m.staged_hbm_pages);
+        printf("  staged_dma_pages: %d\n", m.staged_dma_pages);
+        printf("  buffer_slot_switches: %d\n", m.buffer_slot_switches);
+        printf("  staging_bytes: %d\n", m.staging_bytes);
+    }
+    if (m.eviction_pages_scanned > 0 || m.eviction_pages_evicted > 0 || m.eviction_reclaimed_bytes > 0) {
+        printf("  eviction_pages_scanned: %d\n", m.eviction_pages_scanned);
+        printf("  eviction_pages_evicted: %d\n", m.eviction_pages_evicted);
+        printf("  eviction_draft_pages: %d\n", m.eviction_draft_pages);
+        printf("  eviction_committed_pages: %d\n", m.eviction_committed_pages);
+        printf("  eviction_pinned_skipped: %d\n", m.eviction_pinned_skipped);
+        printf("  eviction_selected_skipped: %d\n", m.eviction_selected_skipped);
+        printf("  eviction_reclaimed_bytes: %d\n", m.eviction_reclaimed_bytes);
+    }
+    if (m.tier_pages_rebalanced > 0 || m.tier_bytes_promoted > 0 || m.tier_bytes_demoted > 0) {
+        printf("  tier_pages_rebalanced: %d\n", m.tier_pages_rebalanced);
+        printf("  tier_promotions_to_hbm: %d\n", m.tier_promotions_to_hbm);
+        printf("  tier_promotions_to_dram: %d\n", m.tier_promotions_to_dram);
+        printf("  tier_demotions_to_dram: %d\n", m.tier_demotions_to_dram);
+        printf("  tier_demotions_to_ssd: %d\n", m.tier_demotions_to_ssd);
+        printf("  tier_final_hbm_pages: %d\n", m.tier_final_hbm_pages);
+        printf("  tier_final_dram_pages: %d\n", m.tier_final_dram_pages);
+        printf("  tier_final_ssd_pages: %d\n", m.tier_final_ssd_pages);
+        printf("  tier_bytes_promoted: %d\n", m.tier_bytes_promoted);
+        printf("  tier_bytes_demoted: %d\n", m.tier_bytes_demoted);
+    }
     if (m.generated_tokens > 0) {
         printf("  generated_tokens: %d\n", m.generated_tokens);
     }
@@ -1129,7 +1781,7 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc) {
             csv_path = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|sparse-gather|verify-commit|dma-movement|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|resident-scheduler|sparse-gather|kv-prefetch|verify-commit|dma-movement|tiered-kv-staging|kv-pressure|tier-residency|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
             return 1;
         }
     }
@@ -1150,13 +1802,18 @@ int main(int argc, char** argv) {
 
     bool do_baseline = (strcmp(mode, "baseline") == 0 || strcmp(mode, "both") == 0);
     bool do_mega = (strcmp(mode, "mega") == 0 || strcmp(mode, "both") == 0);
+    bool do_scheduler = (strcmp(mode, "resident-scheduler") == 0 || strcmp(mode, "research-all") == 0);
     bool do_sparse_gather = (strcmp(mode, "sparse-gather") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_prefetch = (strcmp(mode, "kv-prefetch") == 0 || strcmp(mode, "research-all") == 0);
     bool do_verify_commit = (strcmp(mode, "verify-commit") == 0 || strcmp(mode, "research-all") == 0);
     bool do_dma_movement = (strcmp(mode, "dma-movement") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_tiered_staging = (strcmp(mode, "tiered-kv-staging") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_kv_pressure = (strcmp(mode, "kv-pressure") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_tier_residency = (strcmp(mode, "tier-residency") == 0 || strcmp(mode, "research-all") == 0);
     bool do_research_pipeline = (strcmp(mode, "research-pipeline") == 0 || strcmp(mode, "research-all") == 0);
 
     FILE* csv_file = nullptr;
-    if (csv_path != nullptr && !do_sparse_gather && !do_verify_commit && !do_dma_movement && !do_research_pipeline) {
+    if (csv_path != nullptr && !do_scheduler && !do_sparse_gather && !do_prefetch && !do_verify_commit && !do_dma_movement && !do_tiered_staging && !do_kv_pressure && !do_tier_residency && !do_research_pipeline) {
         csv_file = fopen(csv_path, "w");
         if (csv_file == nullptr) {
             fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
@@ -1167,9 +1824,14 @@ int main(int argc, char** argv) {
 
     RunMetrics baseline_metrics = {};
     RunMetrics mega_metrics = {};
+    ResearchRunMetrics scheduler_metrics = {};
     ResearchRunMetrics sparse_gather_metrics = {};
+    ResearchRunMetrics prefetch_metrics = {};
     ResearchRunMetrics verify_commit_metrics = {};
     ResearchRunMetrics dma_movement_metrics = {};
+    ResearchRunMetrics tiered_staging_metrics = {};
+    ResearchRunMetrics kv_pressure_metrics = {};
+    ResearchRunMetrics tier_residency_metrics = {};
     ResearchRunMetrics research_pipeline_metrics = {};
 
     if (do_baseline) {
@@ -1201,6 +1863,16 @@ int main(int argc, char** argv) {
         if (csv_file) write_csv(csv_file, mega_metrics);
     }
 
+    if (do_scheduler) {
+        printf("\n========================================\n");
+        printf("Resident scheduler kernel:\n");
+        printf("  (GPU-side priority ordering of live requests)\n");
+        printf("========================================\n\n");
+
+        scheduler_metrics = run_scheduler_bench(requests, draft_len);
+        print_research_metrics(scheduler_metrics);
+    }
+
     if (do_sparse_gather) {
         printf("\n========================================\n");
         printf("Sparse KV gather + score kernel:\n");
@@ -1209,6 +1881,16 @@ int main(int argc, char** argv) {
 
         sparse_gather_metrics = run_sparse_gather_bench(requests, draft_len);
         print_research_metrics(sparse_gather_metrics);
+    }
+
+    if (do_prefetch) {
+        printf("\n========================================\n");
+        printf("KV prefetch planner kernel:\n");
+        printf("  (selected sparse pages mapped to double-buffer slots)\n");
+        printf("========================================\n\n");
+
+        prefetch_metrics = run_prefetch_bench(requests, draft_len);
+        print_research_metrics(prefetch_metrics);
     }
 
     if (do_verify_commit) {
@@ -1229,6 +1911,36 @@ int main(int argc, char** argv) {
 
         dma_movement_metrics = run_dma_movement_bench(requests, draft_len);
         print_research_metrics(dma_movement_metrics);
+    }
+
+    if (do_tiered_staging) {
+        printf("\n========================================\n");
+        printf("Tiered KV staging kernel:\n");
+        printf("  (tier-prioritized staging order for selected KV pages)\n");
+        printf("========================================\n\n");
+
+        tiered_staging_metrics = run_tiered_staging_bench(requests, draft_len);
+        print_research_metrics(tiered_staging_metrics);
+    }
+
+    if (do_kv_pressure) {
+        printf("\n========================================\n");
+        printf("KV pressure eviction kernel:\n");
+        printf("  (draft-first eviction under resident KV pressure)\n");
+        printf("========================================\n\n");
+
+        kv_pressure_metrics = run_kv_pressure_bench(requests, draft_len);
+        print_research_metrics(kv_pressure_metrics);
+    }
+
+    if (do_tier_residency) {
+        printf("\n========================================\n");
+        printf("KV tier residency kernel:\n");
+        printf("  (promote selected pages and demote cold pages under tier budgets)\n");
+        printf("========================================\n\n");
+
+        tier_residency_metrics = run_tier_residency_bench(requests, draft_len);
+        print_research_metrics(tier_residency_metrics);
     }
 
     if (do_research_pipeline) {

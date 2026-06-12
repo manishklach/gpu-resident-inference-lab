@@ -25,6 +25,9 @@ add_executable(xlpk_cuda_smoke
     ${CMAKE_CURRENT_SOURCE_DIR}/src/resident_scheduler_kernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/kv_prefetch_planner_kernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dma_aware_kv_movement_planner_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tiered_kv_staging_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/kv_pressure_eviction_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/kv_tier_residency_kernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/compacted_decode_kernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/resident_sparse_decode_pipeline_kernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sparse_kv_gather_kernel.cu

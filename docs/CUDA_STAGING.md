@@ -356,9 +356,14 @@ Without nvcc, the target prints a skip message and succeeds.
 The same launcher exposes standalone research-kernel modes:
 
 ```bash
+./build/cuda/xlpk_cuda_smoke --mode resident-scheduler --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode sparse-gather --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode kv-prefetch --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode verify-commit --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode dma-movement --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode tiered-kv-staging --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode kv-pressure --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode tier-residency --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8
 ```
 
@@ -570,6 +575,9 @@ cuda/
     sparse_kv_gather_kernel.cu      - Sparse KV gather-and-score kernel
     verify_commit_kernel.cu         - Fused verify-and-commit kernel
     dma_aware_kv_movement_planner_kernel.cu - Tiered KV movement planning kernel
+    tiered_kv_staging_kernel.cu     - Tier-aware staging-order kernel
+    kv_pressure_eviction_kernel.cu  - Draft-first KV pressure / eviction kernel
+    kv_tier_residency_kernel.cu     - Hierarchical KV tier rebalance kernel
     host_launcher.cpp               - Host launcher with baseline + mega-kernel paths
 
   examples/

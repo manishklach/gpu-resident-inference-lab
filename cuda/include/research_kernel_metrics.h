@@ -42,6 +42,40 @@ struct DMAMovementPlanMetrics {
     int bytes_from_ssd;
 };
 
+struct TieredKVStagingMetrics {
+    int request_id;
+    int staged_pages;
+    int hbm_pages_staged;
+    int dma_pages_staged;
+    int buffer_slot_switches;
+    int staging_bytes;
+};
+
+struct KVEvictionMetrics {
+    int request_id;
+    int pages_scanned;
+    int pages_evicted;
+    int draft_pages_evicted;
+    int committed_pages_evicted;
+    int pinned_pages_skipped;
+    int selected_pages_skipped;
+    int reclaimed_bytes;
+};
+
+struct KVTierResidencyMetrics {
+    int request_id;
+    int pages_rebalanced;
+    int promotions_to_hbm;
+    int promotions_to_dram;
+    int demotions_to_dram;
+    int demotions_to_ssd;
+    int final_hbm_pages;
+    int final_dram_pages;
+    int final_ssd_pages;
+    int bytes_promoted;
+    int bytes_demoted;
+};
+
 struct CompactedDecodeMetrics {
     int request_id;
     int pages_consumed;

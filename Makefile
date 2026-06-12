@@ -156,14 +156,29 @@ cuda-research-bench:
 		cmake -S cuda -B build/cuda && \
 		cmake --build build/cuda && \
 		echo "" && \
+		echo "=== Resident Scheduler ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode resident-scheduler --requests 8 --draft-len 4 && \
+		echo "" && \
 		echo "=== Sparse KV Gather ===" && \
 		./build/cuda/xlpk_cuda_smoke --mode sparse-gather --requests 8 --draft-len 4 && \
+		echo "" && \
+		echo "=== KV Prefetch Planner ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode kv-prefetch --requests 8 --draft-len 4 && \
 		echo "" && \
 		echo "=== Verify + Commit ===" && \
 		./build/cuda/xlpk_cuda_smoke --mode verify-commit --requests 8 --draft-len 4 && \
 		echo "" && \
 		echo "=== DMA-Aware KV Movement ===" && \
 		./build/cuda/xlpk_cuda_smoke --mode dma-movement --requests 8 --draft-len 4 && \
+		echo "" && \
+		echo "=== Tiered KV Staging ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode tiered-kv-staging --requests 8 --draft-len 4 && \
+		echo "" && \
+		echo "=== KV Pressure Eviction ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode kv-pressure --requests 8 --draft-len 4 && \
+		echo "" && \
+		echo "=== KV Tier Residency ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode tier-residency --requests 8 --draft-len 4 && \
 		echo "" && \
 		echo "=== Resident Research Pipeline ===" && \
 		./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8; \
