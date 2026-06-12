@@ -50,6 +50,7 @@
 #include "request_desc.h"
 #include "kv_page_table.h"
 #include "kernel_status.h"
+#include "research_kernel_metrics.h"
 
 #define CUDA_CHECK(call) do { \
     cudaError_t err = call; \
@@ -71,6 +72,67 @@ extern __global__ void baseline_host_decode_step_kernel(
     RequestDescriptor* requests, int num_requests
 );
 
+extern __global__ void sparse_kv_gather_and_score_kernel(
+    RequestDescriptor* requests,
+    int num_requests,
+    KVPageTable kv_table,
+    const int* page_payloads,
+    int ints_per_page,
+    int max_selected_pages,
+    int* selected_page_ids,
+    int* compacted_payloads,
+    SparseKVGatherMetrics* metrics
+);
+
+extern __global__ void fused_verify_and_commit_kernel(
+    RequestDescriptor* requests,
+    int num_requests,
+    KVPageTable kv_table,
+    int* draft_tokens,
+    VerifyCommitMetrics* metrics
+);
+
+extern __global__ void resident_schedule_requests_kernel(
+    RequestDescriptor* requests,
+    int num_requests,
+    int* scheduled_request_ids,
+    int* scheduled_priorities,
+    SchedulerKernelMetrics* metrics
+);
+
+extern __global__ void kv_prefetch_planner_kernel(
+    const int* selected_page_ids,
+    int num_requests,
+    int max_selected_pages,
+    int bytes_per_page,
+    int* prefetched_page_ids,
+    int* buffer_slots,
+    KVPrefetchMetrics* metrics
+);
+
+extern __global__ void compacted_sparse_decode_kernel(
+    RequestDescriptor* requests,
+    int num_requests,
+    const int* selected_page_ids,
+    const int* compacted_payloads,
+    int ints_per_page,
+    int max_selected_pages,
+    int* draft_tokens,
+    CompactedDecodeMetrics* metrics
+);
+
+extern __global__ void resident_sparse_decode_pipeline_kernel(
+    RequestDescriptor* requests,
+    int num_requests,
+    KVPageTable kv_table,
+    const int* page_payloads,
+    int ints_per_page,
+    int max_selected_pages,
+    int* draft_tokens,
+    ResidentPipelineMetrics* metrics,
+    int max_iterations
+);
+
 constexpr int BLOCK_SIZE = 256;
 constexpr int MEGAKERNEL_BLOCK_SIZE = 1;
 constexpr int EOS_TOKEN_ID = 0;
@@ -90,6 +152,28 @@ struct RunMetrics {
     int launch_reduction;
     int sync_reduction;
     float speedup_vs_baseline;
+};
+
+struct ResearchRunMetrics {
+    const char* mode;
+    int requests;
+    int draft_len;
+    float elapsed_ms;
+    int blocks_examined;
+    int blocks_selected;
+    int bytes_read;
+    int bytes_saved;
+    int speculative_candidates;
+    int accepted_tokens;
+    int rejected_tokens;
+    int committed_pages;
+    int released_pages;
+    int scheduler_requests_examined;
+    int scheduler_requests_scheduled;
+    int prefetch_pages;
+    int prefetch_bytes;
+    int generated_tokens;
+    int loop_iterations;
 };
 
 static RequestDescriptor* alloc_and_copy_to_device(RequestDescriptor* host, int n) {
@@ -154,6 +238,50 @@ static void init_requests(RequestDescriptor* reqs, int n, int max_tokens, bool s
         reqs[i].ema_acceptance_rate = 0.80f;
         reqs[i].current_block_size = 4;
     }
+}
+
+static void init_kv_entries(
+    KVPageEntry* kv_entries,
+    int num_requests,
+    int pages_per_request,
+    int page_size_tokens,
+    int state,
+    int flags
+) {
+    int total_kv_entries = num_requests * pages_per_request;
+    memset(kv_entries, 0, total_kv_entries * sizeof(KVPageEntry));
+    for (int i = 0; i < total_kv_entries; ++i) {
+        kv_entries[i].page_id = i;
+        kv_entries[i].request_id = (i / pages_per_request) + 1;
+        kv_entries[i].layer_id = i % 2;
+        kv_entries[i].start_token = (i % pages_per_request) * page_size_tokens;
+        kv_entries[i].token_count = page_size_tokens;
+        kv_entries[i].state = state;
+        kv_entries[i].flags = flags;
+        kv_entries[i].score = 0.0f;
+        kv_entries[i].selected = 0;
+        kv_entries[i].last_selected_step = -1;
+        kv_entries[i].sparse_rank = -1;
+    }
+}
+
+static KVPageTable make_device_kv_table(KVPageEntry* host_entries, int total_entries, int page_size_tokens, int bytes_per_page, KVPageEntry** d_kv_entries_out) {
+    KVPageEntry* d_kv_entries = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_kv_entries, total_entries * sizeof(KVPageEntry)));
+    CUDA_CHECK(cudaMemcpy(
+        d_kv_entries,
+        host_entries,
+        total_entries * sizeof(KVPageEntry),
+        cudaMemcpyHostToDevice
+    ));
+
+    KVPageTable table;
+    table.entries = d_kv_entries;
+    table.num_entries = total_entries;
+    table.page_size_tokens = page_size_tokens;
+    table.bytes_per_page = bytes_per_page;
+    *d_kv_entries_out = d_kv_entries;
+    return table;
 }
 
 static RunMetrics run_baseline_path(
@@ -344,6 +472,301 @@ static RunMetrics run_megakernel_path(
     return m;
 }
 
+static ResearchRunMetrics run_sparse_gather_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 4;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "sparse_gather";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        ints_per_page * static_cast<int>(sizeof(int)),
+        &d_kv_entries
+    );
+
+    const int payload_count = total_kv_entries * ints_per_page;
+    int* h_payloads = new int[payload_count];
+    for (int i = 0; i < payload_count; ++i) {
+        h_payloads[i] = i + 1;
+    }
+
+    int* d_payloads = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_payloads, payload_count * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_payloads, h_payloads, payload_count * sizeof(int), cudaMemcpyHostToDevice));
+
+    const int max_selected_pages = draft_len > 0 ? draft_len : 2;
+    int* d_selected_page_ids = nullptr;
+    int* d_compacted_payloads = nullptr;
+    SparseKVGatherMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_selected_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_compacted_payloads, N * max_selected_pages * ints_per_page * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_metrics, N * sizeof(SparseKVGatherMetrics)));
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    sparse_kv_gather_and_score_kernel<<<N, 1>>>(
+        d_reqs,
+        N,
+        kv_table,
+        d_payloads,
+        ints_per_page,
+        max_selected_pages,
+        d_selected_page_ids,
+        d_compacted_payloads,
+        d_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    SparseKVGatherMetrics* h_metrics = new SparseKVGatherMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_metrics, d_metrics, N * sizeof(SparseKVGatherMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.blocks_examined += h_metrics[i].blocks_examined;
+        m.blocks_selected += h_metrics[i].blocks_selected;
+        m.bytes_read += h_metrics[i].bytes_read;
+        m.bytes_saved += h_metrics[i].bytes_saved;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_payloads));
+    CUDA_CHECK(cudaFree(d_selected_page_ids));
+    CUDA_CHECK(cudaFree(d_compacted_payloads));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] h_metrics;
+    delete[] h_payloads;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
+static ResearchRunMetrics run_verify_commit_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 4;
+    constexpr int page_size_tokens = 4;
+
+    ResearchRunMetrics m = {};
+    m.mode = "verify_commit";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len);
+    for (int i = 0; i < N; ++i) {
+        requests[i].state = REQUEST_DRAFT_READY;
+        requests[i].draft_len = draft_len;
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_DRAFT,
+        KV_FLAG_RESIDENT | KV_FLAG_DRAFT | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        4096,
+        &d_kv_entries
+    );
+
+    const int total_draft_tokens = N * draft_len;
+    int* h_draft_tokens = new int[total_draft_tokens];
+    for (int req = 0; req < N; ++req) {
+        for (int j = 0; j < draft_len; ++j) {
+            int token = (req + 1) * 10 + j + 1;
+            if (j == draft_len - 1) {
+                token = 4 * (req + 1);
+            }
+            h_draft_tokens[req * draft_len + j] = token;
+        }
+    }
+
+    int* d_draft_tokens = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_draft_tokens, total_draft_tokens * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(
+        d_draft_tokens,
+        h_draft_tokens,
+        total_draft_tokens * sizeof(int),
+        cudaMemcpyHostToDevice
+    ));
+
+    VerifyCommitMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_metrics, N * sizeof(VerifyCommitMetrics)));
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    fused_verify_and_commit_kernel<<<N, 1>>>(d_reqs, N, kv_table, d_draft_tokens, d_metrics);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    VerifyCommitMetrics* h_metrics = new VerifyCommitMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_metrics, d_metrics, N * sizeof(VerifyCommitMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.speculative_candidates += h_metrics[i].speculative_candidates;
+        m.accepted_tokens += h_metrics[i].accepted_tokens;
+        m.rejected_tokens += h_metrics[i].rejected_tokens;
+        m.committed_pages += h_metrics[i].committed_pages;
+        m.released_pages += h_metrics[i].released_pages;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_draft_tokens));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] h_metrics;
+    delete[] h_draft_tokens;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
+static ResearchRunMetrics run_research_pipeline_bench(int N, int draft_len, int max_iterations) {
+    constexpr int pages_per_request = 4;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "research_pipeline";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        ints_per_page * static_cast<int>(sizeof(int)),
+        &d_kv_entries
+    );
+
+    int* h_payloads = new int[total_kv_entries * ints_per_page];
+    for (int i = 0; i < total_kv_entries * ints_per_page; ++i) {
+        h_payloads[i] = (i % ints_per_page) + 1;
+    }
+
+    int* d_payloads = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_payloads, total_kv_entries * ints_per_page * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(
+        d_payloads,
+        h_payloads,
+        total_kv_entries * ints_per_page * sizeof(int),
+        cudaMemcpyHostToDevice
+    ));
+
+    int* d_draft_tokens = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_draft_tokens, N * draft_len * 4 * sizeof(int)));
+    ResidentPipelineMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_metrics, N * sizeof(ResidentPipelineMetrics)));
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    resident_sparse_decode_pipeline_kernel<<<N, 1>>>(
+        d_reqs,
+        N,
+        kv_table,
+        d_payloads,
+        ints_per_page,
+        draft_len > 0 ? draft_len : 2,
+        d_draft_tokens,
+        d_metrics,
+        max_iterations
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    ResidentPipelineMetrics* h_metrics = new ResidentPipelineMetrics[N];
+    CUDA_CHECK(cudaMemcpy(h_metrics, d_metrics, N * sizeof(ResidentPipelineMetrics), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < N; ++i) {
+        m.loop_iterations += h_metrics[i].loop_iterations;
+        m.blocks_selected += h_metrics[i].blocks_selected;
+        m.bytes_read += h_metrics[i].bytes_read;
+        m.accepted_tokens += h_metrics[i].accepted_tokens;
+        m.committed_pages += h_metrics[i].committed_pages;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_payloads));
+    CUDA_CHECK(cudaFree(d_draft_tokens));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] h_metrics;
+    delete[] h_payloads;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
 static void compute_reduction(RunMetrics& mega, const RunMetrics& baseline) {
     mega.launch_reduction = baseline.host_kernel_launches;
     mega.sync_reduction = baseline.host_synchronizations;
@@ -362,6 +785,37 @@ static void print_metrics(const RunMetrics& m) {
         printf("  launch_reduction: %d:1\n", m.launch_reduction);
         printf("  sync_reduction: %d:1\n", m.sync_reduction);
         printf("  speedup_vs_baseline: %.2fx\n", m.speedup_vs_baseline);
+    }
+}
+
+static void print_research_metrics(const ResearchRunMetrics& m) {
+    printf("  elapsed_ms: %.3f\n", m.elapsed_ms);
+    if (m.blocks_examined > 0 || m.blocks_selected > 0) {
+        printf("  blocks_examined: %d\n", m.blocks_examined);
+        printf("  blocks_selected: %d\n", m.blocks_selected);
+        printf("  bytes_read: %d\n", m.bytes_read);
+        printf("  bytes_saved: %d\n", m.bytes_saved);
+    }
+    if (m.speculative_candidates > 0 || m.accepted_tokens > 0 || m.rejected_tokens > 0) {
+        printf("  speculative_candidates: %d\n", m.speculative_candidates);
+        printf("  accepted_tokens: %d\n", m.accepted_tokens);
+        printf("  rejected_tokens: %d\n", m.rejected_tokens);
+        printf("  committed_pages: %d\n", m.committed_pages);
+        printf("  released_pages: %d\n", m.released_pages);
+    }
+    if (m.scheduler_requests_examined > 0 || m.scheduler_requests_scheduled > 0) {
+        printf("  scheduler_requests_examined: %d\n", m.scheduler_requests_examined);
+        printf("  scheduler_requests_scheduled: %d\n", m.scheduler_requests_scheduled);
+    }
+    if (m.prefetch_pages > 0 || m.prefetch_bytes > 0) {
+        printf("  prefetch_pages: %d\n", m.prefetch_pages);
+        printf("  prefetch_bytes: %d\n", m.prefetch_bytes);
+    }
+    if (m.generated_tokens > 0) {
+        printf("  generated_tokens: %d\n", m.generated_tokens);
+    }
+    if (m.loop_iterations > 0) {
+        printf("  loop_iterations: %d\n", m.loop_iterations);
     }
 }
 
@@ -501,7 +955,7 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc) {
             csv_path = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|sparse-gather|verify-commit|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
             return 1;
         }
     }
@@ -522,9 +976,12 @@ int main(int argc, char** argv) {
 
     bool do_baseline = (strcmp(mode, "baseline") == 0 || strcmp(mode, "both") == 0);
     bool do_mega = (strcmp(mode, "mega") == 0 || strcmp(mode, "both") == 0);
+    bool do_sparse_gather = (strcmp(mode, "sparse-gather") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_verify_commit = (strcmp(mode, "verify-commit") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_research_pipeline = (strcmp(mode, "research-pipeline") == 0 || strcmp(mode, "research-all") == 0);
 
     FILE* csv_file = nullptr;
-    if (csv_path != nullptr) {
+    if (csv_path != nullptr && !do_sparse_gather && !do_verify_commit && !do_research_pipeline) {
         csv_file = fopen(csv_path, "w");
         if (csv_file == nullptr) {
             fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
@@ -535,6 +992,9 @@ int main(int argc, char** argv) {
 
     RunMetrics baseline_metrics = {};
     RunMetrics mega_metrics = {};
+    ResearchRunMetrics sparse_gather_metrics = {};
+    ResearchRunMetrics verify_commit_metrics = {};
+    ResearchRunMetrics research_pipeline_metrics = {};
 
     if (do_baseline) {
         printf("\n========================================\n");
@@ -563,6 +1023,36 @@ int main(int argc, char** argv) {
         printf("\nPersistent mega-kernel:\n");
         print_metrics(mega_metrics);
         if (csv_file) write_csv(csv_file, mega_metrics);
+    }
+
+    if (do_sparse_gather) {
+        printf("\n========================================\n");
+        printf("Sparse KV gather + score kernel:\n");
+        printf("  (page scoring, top-k selection, compact gather)\n");
+        printf("========================================\n\n");
+
+        sparse_gather_metrics = run_sparse_gather_bench(requests, draft_len);
+        print_research_metrics(sparse_gather_metrics);
+    }
+
+    if (do_verify_commit) {
+        printf("\n========================================\n");
+        printf("Fused verify + commit kernel:\n");
+        printf("  (speculative verify, commit, release)\n");
+        printf("========================================\n\n");
+
+        verify_commit_metrics = run_verify_commit_bench(requests, draft_len);
+        print_research_metrics(verify_commit_metrics);
+    }
+
+    if (do_research_pipeline) {
+        printf("\n========================================\n");
+        printf("Resident sparse decode pipeline kernel:\n");
+        printf("  (select, gather, decode, verify, commit)\n");
+        printf("========================================\n\n");
+
+        research_pipeline_metrics = run_research_pipeline_bench(requests, draft_len, iterations);
+        print_research_metrics(research_pipeline_metrics);
     }
 
     if (csv_file) {

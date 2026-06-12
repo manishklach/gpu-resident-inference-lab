@@ -11,9 +11,10 @@
 #   make cuda-smoke   - Build and run CUDA smoke test
 #   make cuda-bench   - Build and run CUDA measurement harness
 #   make cuda-bench-large - Larger CUDA measurement run
+#   make cuda-research-bench - Run standalone research-kernel benchmarks
 #   make clean        - Remove build artifacts
 
-.PHONY: install test lint format bench demo compare check-claims cuda-stub cuda-smoke cuda-bench cuda-bench-large clean help
+.PHONY: install test lint format bench demo compare check-claims cuda-stub cuda-smoke cuda-bench cuda-bench-large cuda-research-bench clean help
 
 # Default target
 help:
@@ -29,6 +30,7 @@ help:
 	@echo "  cuda-smoke  - Build and run CUDA staging smoke tests (requires nvcc)"
 	@echo "  cuda-bench  - Build and run CUDA measurement sweep (requires nvcc)"
 	@echo "  cuda-bench-large - Larger CUDA measurement sweep (requires nvcc)"
+	@echo "  cuda-research-bench - Run standalone research-kernel benchmarks (requires nvcc)"
 	@echo "  clean       - Remove build artifacts"
 	@echo "  help        - Show this help"
 
@@ -146,6 +148,26 @@ cuda-bench-large:
 		echo "nvcc not found - skipping large CUDA measurement harness."; \
 		echo "Install the CUDA toolkit (https://developer.nvidia.com/cuda-downloads)"; \
 		echo "to build and run the large CUDA measurement harness."; \
+	fi
+
+cuda-research-bench:
+	@echo "Building and running standalone CUDA research-kernel benchmarks..."
+	@if command -v nvcc >/dev/null 2>&1; then \
+		cmake -S cuda -B build/cuda && \
+		cmake --build build/cuda && \
+		echo "" && \
+		echo "=== Sparse KV Gather ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode sparse-gather --requests 8 --draft-len 4 && \
+		echo "" && \
+		echo "=== Verify + Commit ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode verify-commit --requests 8 --draft-len 4 && \
+		echo "" && \
+		echo "=== Resident Research Pipeline ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8; \
+	else \
+		echo "nvcc not found - skipping CUDA research benchmarks."; \
+		echo "Install the CUDA toolkit (https://developer.nvidia.com/cuda-downloads)"; \
+		echo "to build and run the research-kernel benchmarks."; \
 	fi
 
 clean:

@@ -4,6 +4,13 @@ This document describes the CUDA staging layer for the persistent decode runtime
 
 The repo contains multiple stage helper files, but they are not independent launched kernels. They are device-side helpers intended to be inlined into the persistent mega-kernel. This preserves the central design: many logical stages, one resident GPU kernel.
 
+The staging layer now also includes two standalone research kernels that sit just outside the mega-kernel path:
+
+- `sparse_kv_gather_and_score_kernel` — a sparse KV gather kernel that scores pages, selects top-k blocks, gathers a compact working set, and emits memory-traffic metrics
+- `fused_verify_and_commit_kernel` — a fused speculative verify + commit kernel that advances request state and updates KV lifecycle metadata in one pass
+
+These kernels are not full attention kernels. They are next-step building blocks for turning metadata-only control flow into measurable GPU memory and lifecycle work.
+
 ## What Is Fake Today
 
 All math in the current CUDA scaffold is fake and deterministic. No real transformer operations are performed:
@@ -84,12 +91,44 @@ The pipeline is divided into logical stages, but these are **not separate CUDA k
 |-------|------|---------|
 | Scheduler | `stage_scheduler.cuh` | Pick next request to process |
 | Prefill | `stage_prefill.cuh` | Mark prompt/KV initialized |
+| Sparse KV select | `stage_sparse_kv_select.cuh` | Score resident pages and mark top-k blocks |
 | Decode | `stage_decode.cuh` | Produce token or speculative draft |
 | Verify | `stage_spec_verify.cuh` | Accept/reject draft tokens |
 | Commit | `stage_commit.cuh` | Commit tokens, update KV metadata |
 | KV helpers | `stage_kv.cuh` | Page flag and lifecycle utilities |
 
 The only exception is `baseline_host_decode_kernel.cu`, which exists **solely as a baseline comparison** representing the conventional host-launched model. It is not part of the mega-kernel design.
+
+## Standalone Research Kernels
+
+Two additional kernels now exist as concrete next steps beyond the inline stage-helper scaffold.
+
+### sparse_kv_gather_and_score_kernel
+
+File: `src/sparse_kv_gather_kernel.cu`
+
+This kernel turns sparse KV metadata into actual device memory traffic:
+
+1. score candidate resident pages
+2. mark a deterministic top-k subset
+3. gather selected page payloads into a compact working set
+4. emit per-request gather metrics
+
+It is still fake in the sense that the payloads are deterministic integer buffers rather than real KV tensors, but it is a real kernel for studying sparse page selection and working-set compaction.
+
+### fused_verify_and_commit_kernel
+
+File: `src/verify_commit_kernel.cu`
+
+This kernel fuses:
+
+1. speculative candidate verification
+2. accepted-prefix commit
+3. rejected-page release
+4. adaptive block-size update
+5. request-state transition back to decode-ready or complete
+
+It is a lifecycle kernel rather than an attention kernel. The value is in modeling how speculative verification and KV-state mutation can happen in one pass.
 
 ---
 
@@ -295,6 +334,7 @@ Build and run:
 
 ```bash
 make cuda-smoke
+make cuda-research-bench
 ```
 
 Output format:
@@ -312,6 +352,14 @@ Persistent mega-kernel:
 ```
 
 Without nvcc, the target prints a skip message and succeeds.
+
+The same launcher exposes standalone research-kernel modes:
+
+```bash
+./build/cuda/xlpk_cuda_smoke --mode sparse-gather --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode verify-commit --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8
+```
 
 ---
 
@@ -512,10 +560,14 @@ cuda/
     stage_spec_verify.cuh  - Speculative verify stage helper (inline)
     stage_commit.cuh       - Commit stage helper (inline)
     stage_kv.cuh           - KV page lifecycle helper functions (inline)
+    stage_sparse_kv_select.cuh - Sparse KV top-k selection helper (inline)
+    research_kernel_metrics.h  - Per-request metrics for standalone research kernels
 
   src/
     xl_persistent_megakernel.cu     - ONE fused persistent mega-kernel
     baseline_host_decode_kernel.cu  - Baseline comparison kernel (NOT part of mega-kernel)
+    sparse_kv_gather_kernel.cu      - Sparse KV gather-and-score kernel
+    verify_commit_kernel.cu         - Fused verify-and-commit kernel
     host_launcher.cpp               - Host launcher with baseline + mega-kernel paths
 
   examples/

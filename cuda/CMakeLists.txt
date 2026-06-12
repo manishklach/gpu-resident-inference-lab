@@ -22,7 +22,18 @@ set(INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_executable(xlpk_cuda_smoke
     ${CMAKE_CURRENT_SOURCE_DIR}/src/xl_persistent_megakernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/baseline_host_decode_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/resident_scheduler_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/kv_prefetch_planner_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/compacted_decode_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/resident_sparse_decode_pipeline_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sparse_kv_gather_kernel.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/verify_commit_kernel.cu
     ${CMAKE_CURRENT_SOURCE_DIR}/src/host_launcher.cpp
+)
+
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/host_launcher.cpp
+    PROPERTIES LANGUAGE CUDA
 )
 
 target_include_directories(xlpk_cuda_smoke PRIVATE ${INCLUDE_DIRS})

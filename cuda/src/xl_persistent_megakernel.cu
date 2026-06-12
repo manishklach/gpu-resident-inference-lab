@@ -117,3 +117,4 @@ __global__ void xl_persistent_megakernel(
     }
     // TODO Phase 3: expand to warp-level parallelism when stage helpers
     // become real fused kernels with shared-memory cooperative work.
+}

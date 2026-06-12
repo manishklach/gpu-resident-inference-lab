@@ -12,6 +12,7 @@ EXPECTED_HEADERS = [
     "include/request_desc.h",
     "include/kv_page_table.h",
     "include/queue_desc.h",
+    "include/research_kernel_metrics.h",
     "include/stage_scheduler.cuh",
     "include/stage_prefill.cuh",
     "include/stage_decode.cuh",
@@ -24,6 +25,12 @@ EXPECTED_HEADERS = [
 EXPECTED_SOURCES = [
     "src/xl_persistent_megakernel.cu",
     "src/baseline_host_decode_kernel.cu",
+    "src/resident_scheduler_kernel.cu",
+    "src/kv_prefetch_planner_kernel.cu",
+    "src/compacted_decode_kernel.cu",
+    "src/resident_sparse_decode_pipeline_kernel.cu",
+    "src/sparse_kv_gather_kernel.cu",
+    "src/verify_commit_kernel.cu",
     "src/host_launcher.cpp",
 ]
 

@@ -191,9 +191,17 @@ The `cuda/` directory contains the resident-loop scaffold and the host-launched 
 - `src/xl_persistent_megakernel.cu` models a fused GPU-resident loop
 - `src/baseline_host_decode_kernel.cu` models repeated host-launched decode steps
 - `include/stage_sparse_kv_select.cuh` models sparse KV block selection in the loop
+- `src/sparse_kv_gather_kernel.cu` models page scoring, top-k selection, and compacted sparse KV gather
+- `src/verify_commit_kernel.cu` models fused speculative verify plus accepted-prefix commit and rejected-page release
 - `include/stage_decode.cuh`, `include/stage_spec_verify.cuh`, `include/stage_commit.cuh`, and `include/stage_kv.cuh` model the rest of the logical inference path
 
 These are stage helpers for one resident control-flow prototype. They are not a collection of production CUDA kernels.
+
+The host launcher also exposes standalone research-kernel benchmark modes for:
+
+- sparse KV gather and score
+- fused verify plus commit
+- resident sparse decode pipeline
 
 ## Measurement: Host-Launched Decode vs Persistent Loop
 
@@ -260,6 +268,7 @@ If CUDA is available:
 make cuda-smoke
 make cuda-bench
 make cuda-bench-large
+make cuda-research-bench
 ```
 
 ## Roadmap
