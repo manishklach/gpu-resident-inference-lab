@@ -110,6 +110,16 @@ extern __global__ void kv_prefetch_planner_kernel(
     KVPrefetchMetrics* metrics
 );
 
+extern __global__ void dma_aware_kv_movement_planner_kernel(
+    const int* selected_page_ids,
+    int num_requests,
+    int max_selected_pages,
+    int bytes_per_page,
+    int* source_tiers,
+    int* dma_ops,
+    DMAMovementPlanMetrics* metrics
+);
+
 extern __global__ void compacted_sparse_decode_kernel(
     RequestDescriptor* requests,
     int num_requests,
@@ -172,6 +182,15 @@ struct ResearchRunMetrics {
     int scheduler_requests_scheduled;
     int prefetch_pages;
     int prefetch_bytes;
+    int dma_pages_planned;
+    int dma_hbm_hits;
+    int dma_dram_fetches;
+    int dma_ssd_fetches;
+    int dma_ops;
+    int dma_bytes_moved;
+    int dma_bytes_from_hbm;
+    int dma_bytes_from_dram;
+    int dma_bytes_from_ssd;
     int generated_tokens;
     int loop_iterations;
 };
@@ -667,6 +686,150 @@ static ResearchRunMetrics run_verify_commit_bench(int N, int draft_len) {
     return m;
 }
 
+static ResearchRunMetrics run_dma_movement_bench(int N, int draft_len) {
+    constexpr int pages_per_request = 4;
+    constexpr int page_size_tokens = 4;
+    constexpr int ints_per_page = 16;
+
+    ResearchRunMetrics m = {};
+    m.mode = "dma_movement";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].current_block_size = draft_len > 0 ? draft_len : 2;
+    }
+
+    const int total_kv_entries = N * pages_per_request;
+    KVPageEntry* kv_entries = new KVPageEntry[total_kv_entries];
+    init_kv_entries(
+        kv_entries,
+        N,
+        pages_per_request,
+        page_size_tokens,
+        KV_PAGE_COMMITTED,
+        KV_FLAG_RESIDENT | KV_FLAG_COMMITTED | KV_FLAG_PINNED
+    );
+
+    KVPageEntry* d_kv_entries = nullptr;
+    const int bytes_per_page = ints_per_page * static_cast<int>(sizeof(int));
+    KVPageTable kv_table = make_device_kv_table(
+        kv_entries,
+        total_kv_entries,
+        page_size_tokens,
+        bytes_per_page,
+        &d_kv_entries
+    );
+
+    const int payload_count = total_kv_entries * ints_per_page;
+    int* h_payloads = new int[payload_count];
+    for (int i = 0; i < payload_count; ++i) {
+        h_payloads[i] = i + 1;
+    }
+
+    int* d_payloads = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_payloads, payload_count * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_payloads, h_payloads, payload_count * sizeof(int), cudaMemcpyHostToDevice));
+
+    const int max_selected_pages = draft_len > 0 ? draft_len : 2;
+    int* d_selected_page_ids = nullptr;
+    int* d_compacted_payloads = nullptr;
+    SparseKVGatherMetrics* d_gather_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_selected_page_ids, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_compacted_payloads, N * max_selected_pages * ints_per_page * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_gather_metrics, N * sizeof(SparseKVGatherMetrics)));
+
+    int* d_source_tiers = nullptr;
+    int* d_dma_ops = nullptr;
+    DMAMovementPlanMetrics* d_dma_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_source_tiers, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_dma_ops, N * max_selected_pages * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_dma_metrics, N * sizeof(DMAMovementPlanMetrics)));
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    sparse_kv_gather_and_score_kernel<<<N, 1>>>(
+        d_reqs,
+        N,
+        kv_table,
+        d_payloads,
+        ints_per_page,
+        max_selected_pages,
+        d_selected_page_ids,
+        d_compacted_payloads,
+        d_gather_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    dma_aware_kv_movement_planner_kernel<<<N, 1>>>(
+        d_selected_page_ids,
+        N,
+        max_selected_pages,
+        bytes_per_page,
+        d_source_tiers,
+        d_dma_ops,
+        d_dma_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    SparseKVGatherMetrics* h_gather_metrics = new SparseKVGatherMetrics[N];
+    DMAMovementPlanMetrics* h_dma_metrics = new DMAMovementPlanMetrics[N];
+    CUDA_CHECK(cudaMemcpy(
+        h_gather_metrics,
+        d_gather_metrics,
+        N * sizeof(SparseKVGatherMetrics),
+        cudaMemcpyDeviceToHost
+    ));
+    CUDA_CHECK(cudaMemcpy(
+        h_dma_metrics,
+        d_dma_metrics,
+        N * sizeof(DMAMovementPlanMetrics),
+        cudaMemcpyDeviceToHost
+    ));
+
+    for (int i = 0; i < N; ++i) {
+        m.blocks_examined += h_gather_metrics[i].blocks_examined;
+        m.blocks_selected += h_gather_metrics[i].blocks_selected;
+        m.bytes_read += h_gather_metrics[i].bytes_read;
+        m.bytes_saved += h_gather_metrics[i].bytes_saved;
+        m.dma_pages_planned += h_dma_metrics[i].pages_planned;
+        m.dma_hbm_hits += h_dma_metrics[i].hbm_hits;
+        m.dma_dram_fetches += h_dma_metrics[i].dram_fetches;
+        m.dma_ssd_fetches += h_dma_metrics[i].ssd_fetches;
+        m.dma_ops += h_dma_metrics[i].dma_ops;
+        m.dma_bytes_moved += h_dma_metrics[i].bytes_moved;
+        m.dma_bytes_from_hbm += h_dma_metrics[i].bytes_from_hbm;
+        m.dma_bytes_from_dram += h_dma_metrics[i].bytes_from_dram;
+        m.dma_bytes_from_ssd += h_dma_metrics[i].bytes_from_ssd;
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_kv_entries));
+    CUDA_CHECK(cudaFree(d_payloads));
+    CUDA_CHECK(cudaFree(d_selected_page_ids));
+    CUDA_CHECK(cudaFree(d_compacted_payloads));
+    CUDA_CHECK(cudaFree(d_gather_metrics));
+    CUDA_CHECK(cudaFree(d_source_tiers));
+    CUDA_CHECK(cudaFree(d_dma_ops));
+    CUDA_CHECK(cudaFree(d_dma_metrics));
+    delete[] h_gather_metrics;
+    delete[] h_dma_metrics;
+    delete[] h_payloads;
+    delete[] kv_entries;
+    delete[] requests;
+    return m;
+}
+
 static ResearchRunMetrics run_research_pipeline_bench(int N, int draft_len, int max_iterations) {
     constexpr int pages_per_request = 4;
     constexpr int page_size_tokens = 4;
@@ -810,6 +973,17 @@ static void print_research_metrics(const ResearchRunMetrics& m) {
     if (m.prefetch_pages > 0 || m.prefetch_bytes > 0) {
         printf("  prefetch_pages: %d\n", m.prefetch_pages);
         printf("  prefetch_bytes: %d\n", m.prefetch_bytes);
+    }
+    if (m.dma_pages_planned > 0 || m.dma_ops > 0 || m.dma_bytes_moved > 0) {
+        printf("  dma_pages_planned: %d\n", m.dma_pages_planned);
+        printf("  dma_hbm_hits: %d\n", m.dma_hbm_hits);
+        printf("  dma_dram_fetches: %d\n", m.dma_dram_fetches);
+        printf("  dma_ssd_fetches: %d\n", m.dma_ssd_fetches);
+        printf("  dma_ops: %d\n", m.dma_ops);
+        printf("  dma_bytes_moved: %d\n", m.dma_bytes_moved);
+        printf("  dma_bytes_from_hbm: %d\n", m.dma_bytes_from_hbm);
+        printf("  dma_bytes_from_dram: %d\n", m.dma_bytes_from_dram);
+        printf("  dma_bytes_from_ssd: %d\n", m.dma_bytes_from_ssd);
     }
     if (m.generated_tokens > 0) {
         printf("  generated_tokens: %d\n", m.generated_tokens);
@@ -955,7 +1129,7 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc) {
             csv_path = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|sparse-gather|verify-commit|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|sparse-gather|verify-commit|dma-movement|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
             return 1;
         }
     }
@@ -978,10 +1152,11 @@ int main(int argc, char** argv) {
     bool do_mega = (strcmp(mode, "mega") == 0 || strcmp(mode, "both") == 0);
     bool do_sparse_gather = (strcmp(mode, "sparse-gather") == 0 || strcmp(mode, "research-all") == 0);
     bool do_verify_commit = (strcmp(mode, "verify-commit") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_dma_movement = (strcmp(mode, "dma-movement") == 0 || strcmp(mode, "research-all") == 0);
     bool do_research_pipeline = (strcmp(mode, "research-pipeline") == 0 || strcmp(mode, "research-all") == 0);
 
     FILE* csv_file = nullptr;
-    if (csv_path != nullptr && !do_sparse_gather && !do_verify_commit && !do_research_pipeline) {
+    if (csv_path != nullptr && !do_sparse_gather && !do_verify_commit && !do_dma_movement && !do_research_pipeline) {
         csv_file = fopen(csv_path, "w");
         if (csv_file == nullptr) {
             fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
@@ -994,6 +1169,7 @@ int main(int argc, char** argv) {
     RunMetrics mega_metrics = {};
     ResearchRunMetrics sparse_gather_metrics = {};
     ResearchRunMetrics verify_commit_metrics = {};
+    ResearchRunMetrics dma_movement_metrics = {};
     ResearchRunMetrics research_pipeline_metrics = {};
 
     if (do_baseline) {
@@ -1043,6 +1219,16 @@ int main(int argc, char** argv) {
 
         verify_commit_metrics = run_verify_commit_bench(requests, draft_len);
         print_research_metrics(verify_commit_metrics);
+    }
+
+    if (do_dma_movement) {
+        printf("\n========================================\n");
+        printf("DMA-aware KV movement planner kernel:\n");
+        printf("  (sparse-selected pages mapped to tiered movement ops)\n");
+        printf("========================================\n\n");
+
+        dma_movement_metrics = run_dma_movement_bench(requests, draft_len);
+        print_research_metrics(dma_movement_metrics);
     }
 
     if (do_research_pipeline) {

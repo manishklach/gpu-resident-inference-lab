@@ -27,6 +27,7 @@ EXPECTED_SOURCES = [
     "src/baseline_host_decode_kernel.cu",
     "src/resident_scheduler_kernel.cu",
     "src/kv_prefetch_planner_kernel.cu",
+    "src/dma_aware_kv_movement_planner_kernel.cu",
     "src/compacted_decode_kernel.cu",
     "src/resident_sparse_decode_pipeline_kernel.cu",
     "src/sparse_kv_gather_kernel.cu",

@@ -29,6 +29,19 @@ struct KVPrefetchMetrics {
     int prefetch_bytes;
 };
 
+struct DMAMovementPlanMetrics {
+    int request_id;
+    int pages_planned;
+    int hbm_hits;
+    int dram_fetches;
+    int ssd_fetches;
+    int dma_ops;
+    int bytes_moved;
+    int bytes_from_hbm;
+    int bytes_from_dram;
+    int bytes_from_ssd;
+};
+
 struct CompactedDecodeMetrics {
     int request_id;
     int pages_consumed;

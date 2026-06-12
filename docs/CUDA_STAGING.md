@@ -358,6 +358,7 @@ The same launcher exposes standalone research-kernel modes:
 ```bash
 ./build/cuda/xlpk_cuda_smoke --mode sparse-gather --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode verify-commit --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode dma-movement --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8
 ```
 
@@ -568,6 +569,7 @@ cuda/
     baseline_host_decode_kernel.cu  - Baseline comparison kernel (NOT part of mega-kernel)
     sparse_kv_gather_kernel.cu      - Sparse KV gather-and-score kernel
     verify_commit_kernel.cu         - Fused verify-and-commit kernel
+    dma_aware_kv_movement_planner_kernel.cu - Tiered KV movement planning kernel
     host_launcher.cpp               - Host launcher with baseline + mega-kernel paths
 
   examples/

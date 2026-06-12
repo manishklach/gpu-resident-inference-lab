@@ -110,6 +110,18 @@ A conceptual CUDA sketch showing how warp specialization maps onto the persisten
 - Declared as conceptual only — not real TileRT, not real DFlash
 - Does not compile by default
 
+## Phase 2F: Tiered KV Movement Planning
+
+**In progress**
+
+Model how sparse-selected KV pages would be sourced into the resident decode path from different memory tiers.
+
+- `cuda/src/dma_aware_kv_movement_planner_kernel.cu`
+- Deterministic HBM / DRAM / SSD source-tier classification for selected pages
+- Metadata-only DMA op planning for page movement into the compact decode working set
+- Host launcher mode: `--mode dma-movement`
+- Explicitly a research planner, not real async copy or production paging logic
+
 ## Phase 3: Real Fused Decode/Verify Kernels
 
 **Planned**

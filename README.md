@@ -140,6 +140,7 @@ That is the central systems point behind this repo. Persistent execution matters
 
 - Persistent execution scaffold in both Python simulation and CUDA staging
 - Sparse KV block selection path with deterministic top-k selection
+- DMA-aware KV movement planning over sparse-selected pages
 - Speculative/token-parallel workflow scaffolding
 - KV lifecycle tracking across committed, draft, selected, and released states
 - Benchmark harness for control-flow and memory-accounting experiments
@@ -201,7 +202,10 @@ The host launcher also exposes standalone research-kernel benchmark modes for:
 
 - sparse KV gather and score
 - fused verify plus commit
+- DMA-aware KV movement planning
 - resident sparse decode pipeline
+
+The DMA-aware planner is still deliberately narrow in scope: it models how sparse-selected pages would be classified as HBM hits or DRAM/SSD fetches before decode consumes the compact working set. It does not implement real async copy, TMA, tier allocators, or production paging logic.
 
 ## Measurement: Host-Launched Decode vs Persistent Loop
 
@@ -286,7 +290,7 @@ Next:
 - [ ] Multi-request scheduling
 - [ ] Hierarchical KV tiers
 - [ ] HBM / DRAM / SSD simulation
-- [ ] DMA-aware KV movement model
+- [x] DMA-aware KV movement model
 - [ ] Trace-driven replay
 - [ ] Memory pressure simulation
 - [ ] Visualization of KV block selection
