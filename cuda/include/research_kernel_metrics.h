@@ -76,6 +76,16 @@ struct KVTierResidencyMetrics {
     int bytes_demoted;
 };
 
+struct TraceReplayMetrics {
+    int replay_steps;
+    int arrival_events;
+    int admission_events;
+    int completion_events;
+    int queue_high_watermark;
+    int active_high_watermark;
+    int total_service_quanta;
+};
+
 struct CompactedDecodeMetrics {
     int request_id;
     int pages_consumed;

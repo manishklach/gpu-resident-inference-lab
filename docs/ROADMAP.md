@@ -158,6 +158,18 @@ Model the residency policy that sits between staging and eviction: which pages s
 - Host launcher mode: `--mode tier-residency`
 - Still metadata-only; not a globally coordinated residency manager or real migration engine
 
+## Phase 2J: Trace Replay and Admission
+
+**In progress**
+
+Add a device-side replay pass that introduces time, arrival order, bounded admission, and completion ordering into the research suite.
+
+- `cuda/src/trace_replay_admission_kernel.cu`
+- Deterministic arrival/service trace replay through `queue_desc.h`
+- Pending-queue depth, active-set watermark, admission count, and completion count metrics
+- Host launcher mode: `--mode trace-replay`
+- Still single-threaded and metadata-only; not real continuous batching or concurrent queue execution
+
 ## Phase 3: Real Fused Decode/Verify Kernels
 
 **Planned**

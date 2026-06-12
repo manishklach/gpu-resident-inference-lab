@@ -364,6 +364,7 @@ The same launcher exposes standalone research-kernel modes:
 ./build/cuda/xlpk_cuda_smoke --mode tiered-kv-staging --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode kv-pressure --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode tier-residency --requests 8 --draft-len 4
+./build/cuda/xlpk_cuda_smoke --mode trace-replay --requests 8 --draft-len 4
 ./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8
 ```
 
@@ -578,6 +579,7 @@ cuda/
     tiered_kv_staging_kernel.cu     - Tier-aware staging-order kernel
     kv_pressure_eviction_kernel.cu  - Draft-first KV pressure / eviction kernel
     kv_tier_residency_kernel.cu     - Hierarchical KV tier rebalance kernel
+    trace_replay_admission_kernel.cu - Trace-driven admission and completion replay
     host_launcher.cpp               - Host launcher with baseline + mega-kernel paths
 
   examples/

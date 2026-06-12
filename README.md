@@ -1,13 +1,15 @@
 # XL-Persistent-Kernel
 
-Persistent GPU-Resident Inference Research Platform
+Persistent GPU-Resident Inference Research Platform for Sparse KV, Tiered Residency, and Speculative Decode
 
 [![CI](https://github.com/manishklach/XL-Persistent-Kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/manishklach/XL-Persistent-Kernel/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: Research](https://img.shields.io/badge/license-Research%20Use-yellow)](LICENSE)
 [![Blog](https://img.shields.io/badge/GitHub%20Pages-blog-green)](https://manishklach.github.io/XL-Persistent-Kernel/)
 
-XL-Persistent-Kernel explores the convergence of persistent GPU-resident execution, sparse KV block selection, speculative/token-parallel decode workflows, and KV cache lifecycle management.
+XL-Persistent-Kernel is a research platform for future inference loops where control flow, KV movement, and request scheduling stay GPU-resident as much as possible.
+
+It explores the convergence of persistent execution, sparse KV block selection, speculative/token-parallel decode workflows, hierarchical KV tier residency, memory-pressure handling, and trace-driven device-side admission.
 
 > This is a research and educational platform. It models inference control flow and memory scheduling. It is not a production LLM runtime.
 
@@ -144,6 +146,7 @@ That is the central systems point behind this repo. Persistent execution matters
 - Tier-aware KV staging plan that orders selected pages for resident decode
 - KV pressure and draft-first eviction scaffold for resident memory reclamation
 - Hierarchical KV tier rebalance across HBM, DRAM, and SSD budgets
+- Trace-driven request admission and completion replay on device queues
 - Speculative/token-parallel workflow scaffolding
 - KV lifecycle tracking across committed, draft, selected, and released states
 - Benchmark harness for control-flow and memory-accounting experiments
@@ -211,6 +214,7 @@ The host launcher also exposes standalone research-kernel benchmark modes for:
 - tiered KV staging
 - KV pressure eviction
 - KV tier residency rebalance
+- trace replay admission
 - resident sparse decode pipeline
 
 The DMA-aware planner is still deliberately narrow in scope: it models how sparse-selected pages would be classified as HBM hits or DRAM/SSD fetches before decode consumes the compact working set. It does not implement real async copy, TMA, tier allocators, or production paging logic.
@@ -220,6 +224,8 @@ The tiered staging kernel builds one step on top of that: it reorders selected p
 The KV pressure kernel models the next control problem after staging: reclaiming memory when the resident working set gets too large. It applies a deterministic draft-first eviction policy, skips pinned and currently selected pages, and emits reclaimed-byte accounting. This is still not a real allocator or full cache manager.
 
 The KV tier residency kernel sits between staging and eviction: it promotes sparse-selected pages upward through the tier hierarchy and demotes colder non-selected pages when per-request HBM and DRAM budgets are exceeded. This models residency policy and tier pressure, not real migration overlap or globally coordinated cache management.
+
+The trace replay kernel adds time and admission dynamics on top of those one-shot passes. It replays deterministic arrivals and service quanta through a device-side pending queue, bounded active set, and completion ordering surface. This is still a single-threaded research queue model, not full continuous batching.
 
 ## Measurement: Host-Launched Decode vs Persistent Loop
 
@@ -306,7 +312,7 @@ Next:
 - [x] HBM / DRAM / SSD simulation
 - [x] DMA-aware KV movement model
 - [x] Memory pressure simulation
-- [ ] Trace-driven replay
+- [x] Trace-driven replay
 - [ ] Visualization of KV block selection
 - [ ] Benchmark report generation
 

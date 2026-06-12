@@ -180,6 +180,9 @@ cuda-research-bench:
 		echo "=== KV Tier Residency ===" && \
 		./build/cuda/xlpk_cuda_smoke --mode tier-residency --requests 8 --draft-len 4 && \
 		echo "" && \
+		echo "=== Trace Replay Admission ===" && \
+		./build/cuda/xlpk_cuda_smoke --mode trace-replay --requests 8 --draft-len 4 && \
+		echo "" && \
 		echo "=== Resident Research Pipeline ===" && \
 		./build/cuda/xlpk_cuda_smoke --mode research-pipeline --requests 8 --draft-len 4 --iterations 8; \
 	else \

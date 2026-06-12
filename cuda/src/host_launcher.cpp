@@ -50,6 +50,7 @@
 #include "request_desc.h"
 #include "kv_page_table.h"
 #include "kernel_status.h"
+#include "queue_desc.h"
 #include "research_kernel_metrics.h"
 
 #define CUDA_CHECK(call) do { \
@@ -152,6 +153,21 @@ extern __global__ void kv_tier_residency_kernel(
     KVTierResidencyMetrics* metrics
 );
 
+extern __global__ void trace_replay_admission_kernel(
+    RequestDescriptor* requests,
+    int num_requests,
+    const int* arrival_steps,
+    const int* service_steps,
+    int max_trace_steps,
+    int max_active_requests,
+    DeviceQueue pending_queue,
+    int* active_request_ids,
+    int* active_remaining_steps,
+    int* admission_order,
+    int* completion_order,
+    TraceReplayMetrics* metrics
+);
+
 extern __global__ void compacted_sparse_decode_kernel(
     RequestDescriptor* requests,
     int num_requests,
@@ -245,6 +261,13 @@ struct ResearchRunMetrics {
     int tier_final_ssd_pages;
     int tier_bytes_promoted;
     int tier_bytes_demoted;
+    int replay_steps;
+    int replay_arrivals;
+    int replay_admissions;
+    int replay_completions;
+    int replay_queue_high_watermark;
+    int replay_active_high_watermark;
+    int replay_total_service_quanta;
     int generated_tokens;
     int loop_iterations;
 };
@@ -1454,6 +1477,118 @@ static ResearchRunMetrics run_tier_residency_bench(int N, int draft_len) {
     return m;
 }
 
+static ResearchRunMetrics run_trace_replay_bench(int N, int draft_len) {
+    ResearchRunMetrics m = {};
+    m.mode = "trace_replay";
+    m.requests = N;
+    m.draft_len = draft_len;
+
+    RequestDescriptor* requests = new RequestDescriptor[N];
+    init_requests(requests, N, 8, true, draft_len * 4);
+    for (int i = 0; i < N; ++i) {
+        requests[i].set_state(REQUEST_EMPTY);
+        requests[i].priority = (i * 5) % (N + 3);
+    }
+
+    int* h_arrival_steps = new int[N];
+    int* h_service_steps = new int[N];
+    for (int i = 0; i < N; ++i) {
+        h_arrival_steps[i] = i / 2;
+        h_service_steps[i] = 1 + (i % 3);
+    }
+
+    RequestDescriptor* d_reqs = alloc_and_copy_to_device(requests, N);
+    int* d_arrival_steps = nullptr;
+    int* d_service_steps = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_arrival_steps, N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_service_steps, N * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_arrival_steps, h_arrival_steps, N * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_service_steps, h_service_steps, N * sizeof(int), cudaMemcpyHostToDevice));
+
+    int queue_capacity = N + 1;
+    int* d_queue_entries = nullptr;
+    int* d_queue_head = nullptr;
+    int* d_queue_tail = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_queue_entries, queue_capacity * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_queue_head, sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_queue_tail, sizeof(int)));
+    int zero = 0;
+    CUDA_CHECK(cudaMemcpy(d_queue_head, &zero, sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_queue_tail, &zero, sizeof(int), cudaMemcpyHostToDevice));
+
+    DeviceQueue pending_queue;
+    pending_queue.entries = d_queue_entries;
+    pending_queue.capacity = queue_capacity;
+    pending_queue.head = d_queue_head;
+    pending_queue.tail = d_queue_tail;
+
+    int max_active_requests = draft_len > 0 ? draft_len : 2;
+    if (max_active_requests > N) {
+        max_active_requests = N;
+    }
+    int* d_active_request_ids = nullptr;
+    int* d_active_remaining_steps = nullptr;
+    int* d_admission_order = nullptr;
+    int* d_completion_order = nullptr;
+    TraceReplayMetrics* d_metrics = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_active_request_ids, max_active_requests * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_active_remaining_steps, max_active_requests * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_admission_order, N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_completion_order, N * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_metrics, sizeof(TraceReplayMetrics)));
+
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    trace_replay_admission_kernel<<<1, 1>>>(
+        d_reqs,
+        N,
+        d_arrival_steps,
+        d_service_steps,
+        N + 8,
+        max_active_requests,
+        pending_queue,
+        d_active_request_ids,
+        d_active_remaining_steps,
+        d_admission_order,
+        d_completion_order,
+        d_metrics
+    );
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&m.elapsed_ms, start, stop));
+
+    TraceReplayMetrics h_metric = {};
+    CUDA_CHECK(cudaMemcpy(&h_metric, d_metrics, sizeof(TraceReplayMetrics), cudaMemcpyDeviceToHost));
+    m.replay_steps = h_metric.replay_steps;
+    m.replay_arrivals = h_metric.arrival_events;
+    m.replay_admissions = h_metric.admission_events;
+    m.replay_completions = h_metric.completion_events;
+    m.replay_queue_high_watermark = h_metric.queue_high_watermark;
+    m.replay_active_high_watermark = h_metric.active_high_watermark;
+    m.replay_total_service_quanta = h_metric.total_service_quanta;
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaFree(d_reqs));
+    CUDA_CHECK(cudaFree(d_arrival_steps));
+    CUDA_CHECK(cudaFree(d_service_steps));
+    CUDA_CHECK(cudaFree(d_queue_entries));
+    CUDA_CHECK(cudaFree(d_queue_head));
+    CUDA_CHECK(cudaFree(d_queue_tail));
+    CUDA_CHECK(cudaFree(d_active_request_ids));
+    CUDA_CHECK(cudaFree(d_active_remaining_steps));
+    CUDA_CHECK(cudaFree(d_admission_order));
+    CUDA_CHECK(cudaFree(d_completion_order));
+    CUDA_CHECK(cudaFree(d_metrics));
+    delete[] h_arrival_steps;
+    delete[] h_service_steps;
+    delete[] requests;
+    return m;
+}
+
 static ResearchRunMetrics run_research_pipeline_bench(int N, int draft_len, int max_iterations) {
     constexpr int pages_per_request = 4;
     constexpr int page_size_tokens = 4;
@@ -1637,6 +1772,15 @@ static void print_research_metrics(const ResearchRunMetrics& m) {
         printf("  tier_bytes_promoted: %d\n", m.tier_bytes_promoted);
         printf("  tier_bytes_demoted: %d\n", m.tier_bytes_demoted);
     }
+    if (m.replay_steps > 0 || m.replay_arrivals > 0 || m.replay_admissions > 0) {
+        printf("  replay_steps: %d\n", m.replay_steps);
+        printf("  replay_arrivals: %d\n", m.replay_arrivals);
+        printf("  replay_admissions: %d\n", m.replay_admissions);
+        printf("  replay_completions: %d\n", m.replay_completions);
+        printf("  replay_queue_high_watermark: %d\n", m.replay_queue_high_watermark);
+        printf("  replay_active_high_watermark: %d\n", m.replay_active_high_watermark);
+        printf("  replay_total_service_quanta: %d\n", m.replay_total_service_quanta);
+    }
     if (m.generated_tokens > 0) {
         printf("  generated_tokens: %d\n", m.generated_tokens);
     }
@@ -1781,7 +1925,7 @@ int main(int argc, char** argv) {
         } else if (strcmp(argv[i], "--csv") == 0 && i + 1 < argc) {
             csv_path = argv[++i];
         } else {
-            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|resident-scheduler|sparse-gather|kv-prefetch|verify-commit|dma-movement|tiered-kv-staging|kv-pressure|tier-residency|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--mode baseline|mega|both|sweep|resident-scheduler|sparse-gather|kv-prefetch|verify-commit|dma-movement|tiered-kv-staging|kv-pressure|tier-residency|trace-replay|research-pipeline|research-all] [--requests N] [--tokens N] [--draft-len N] [--iterations N] [--csv path]\n", argv[0]);
             return 1;
         }
     }
@@ -1810,10 +1954,11 @@ int main(int argc, char** argv) {
     bool do_tiered_staging = (strcmp(mode, "tiered-kv-staging") == 0 || strcmp(mode, "research-all") == 0);
     bool do_kv_pressure = (strcmp(mode, "kv-pressure") == 0 || strcmp(mode, "research-all") == 0);
     bool do_tier_residency = (strcmp(mode, "tier-residency") == 0 || strcmp(mode, "research-all") == 0);
+    bool do_trace_replay = (strcmp(mode, "trace-replay") == 0 || strcmp(mode, "research-all") == 0);
     bool do_research_pipeline = (strcmp(mode, "research-pipeline") == 0 || strcmp(mode, "research-all") == 0);
 
     FILE* csv_file = nullptr;
-    if (csv_path != nullptr && !do_scheduler && !do_sparse_gather && !do_prefetch && !do_verify_commit && !do_dma_movement && !do_tiered_staging && !do_kv_pressure && !do_tier_residency && !do_research_pipeline) {
+    if (csv_path != nullptr && !do_scheduler && !do_sparse_gather && !do_prefetch && !do_verify_commit && !do_dma_movement && !do_tiered_staging && !do_kv_pressure && !do_tier_residency && !do_trace_replay && !do_research_pipeline) {
         csv_file = fopen(csv_path, "w");
         if (csv_file == nullptr) {
             fprintf(stderr, "Error: cannot open %s for writing\n", csv_path);
@@ -1832,6 +1977,7 @@ int main(int argc, char** argv) {
     ResearchRunMetrics tiered_staging_metrics = {};
     ResearchRunMetrics kv_pressure_metrics = {};
     ResearchRunMetrics tier_residency_metrics = {};
+    ResearchRunMetrics trace_replay_metrics = {};
     ResearchRunMetrics research_pipeline_metrics = {};
 
     if (do_baseline) {
@@ -1941,6 +2087,16 @@ int main(int argc, char** argv) {
 
         tier_residency_metrics = run_tier_residency_bench(requests, draft_len);
         print_research_metrics(tier_residency_metrics);
+    }
+
+    if (do_trace_replay) {
+        printf("\n========================================\n");
+        printf("Trace replay admission kernel:\n");
+        printf("  (device-side arrival, queue, admission, and completion replay)\n");
+        printf("========================================\n\n");
+
+        trace_replay_metrics = run_trace_replay_bench(requests, draft_len);
+        print_research_metrics(trace_replay_metrics);
     }
 
     if (do_research_pipeline) {

@@ -31,6 +31,7 @@ EXPECTED_SOURCES = [
     "src/tiered_kv_staging_kernel.cu",
     "src/kv_pressure_eviction_kernel.cu",
     "src/kv_tier_residency_kernel.cu",
+    "src/trace_replay_admission_kernel.cu",
     "src/compacted_decode_kernel.cu",
     "src/resident_sparse_decode_pipeline_kernel.cu",
     "src/sparse_kv_gather_kernel.cu",
