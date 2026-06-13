@@ -334,6 +334,24 @@ Research lab for GPU-resident LLM inference loops: persistent kernels, sparse KV
 - [docs/ROADMAP.md](docs/ROADMAP.md)
 - [docs/BLOG.md](docs/BLOG.md)
 
+## Where This Is Going
+
+The long-term direction is not just faster tokens per second.
+
+The deeper target is **verified decisions per second**.
+
+Future inference systems will likely combine:
+
+- continuous batching for many concurrent agents and reasoning branches
+- speculative decoding evolving into speculative reasoning
+- adaptive precision routing across FP4, FP8, and BF16
+- memory-aware model architecture across HBM, L2, shared memory, registers, and KV tiers
+- GPU-resident persistent loops that fuse draft, verify, commit, KV update, and scheduling
+
+In this framing, the winning system is not only the fastest token generator.
+
+It is the fastest correct reasoner.
+
 ## License
 
 Research use only. See [LICENSE](LICENSE).

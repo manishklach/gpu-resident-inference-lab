@@ -85,3 +85,21 @@ The next inference bottleneck is not only FLOPs. It is the shape of the decode l
 Once quantization reduces weight bandwidth, sparsity reduces active compute, and wider decode strategies create more resident work, the remaining runtime challenge is to keep that work on GPU with fewer orchestration gaps and less unnecessary KV traffic.
 
 That is the layer this repo is trying to make legible.
+
+## From Tokens Per Second to Decisions Per Second
+
+The long-term direction is not just faster tokens per second.
+
+The deeper target is **verified decisions per second**.
+
+Future inference systems will likely combine:
+
+- continuous batching for many concurrent agents and reasoning branches
+- speculative decoding evolving into speculative reasoning
+- adaptive precision routing across FP4, FP8, and BF16
+- memory-aware model architecture across HBM, L2, shared memory, registers, and KV tiers
+- GPU-resident persistent loops that fuse draft, verify, commit, KV update, and scheduling
+
+In this framing, the winning system is not only the fastest token generator.
+
+It is the fastest correct reasoner.

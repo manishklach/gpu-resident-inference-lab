@@ -124,6 +124,26 @@ Expected artifacts:
 Validation metric:
 - TTFT and inter-token latency in future multi-device real-model mode
 
+## Phase 9: GPU-Resident Reasoning Pipeline
+
+Goal:
+Extend the resident decode loop from token generation toward branch-level reasoning workflows.
+
+Ideas:
+- speculative reasoning branches instead of only speculative tokens
+- verifier/commit logic for candidate reasoning paths
+- adaptive precision per token, layer, or reasoning segment
+- retrieval/tool-call scheduling inside the resident loop
+- decision-quality metrics in addition to token throughput
+
+Validation metrics:
+- accepted tokens per verify step
+- accepted reasoning branches per verification cycle
+- verifier rejection rate
+- decisions per second
+- correct decisions per second
+- latency per verified answer
+
 ## Current Artifacts
 
 Today’s repo already includes:
