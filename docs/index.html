@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>One Kernel to Rule Them All — XL-Persistent-Kernel</title>
+<title>GPU Resident Inference Lab</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -536,13 +536,13 @@
       <div class="hero-meta-item">∿ <span>GPU Systems</span></div>
       <div class="hero-meta-item">⌁ <span>LLM Inference</span></div>
       <div class="hero-meta-item"># <span>Speculative Decode</span></div>
-      <a href="https://github.com/manishklach/XL-Persistent-Kernel" class="hero-link" target="_blank">
+      <a href="https://github.com/manishklach/gpu-resident-inference-lab" class="hero-link" target="_blank">
         ↗ View on GitHub
       </a>
     </div>
     <div style="margin-top: 0.75rem; position: relative; display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
       <span style="font-family: var(--mono); font-size: 11px; color: var(--text-dim);">Code:</span>
-      <a href="https://github.com/manishklach/XL-Persistent-Kernel" style="font-family: var(--mono); font-size: 12px; color: var(--green); text-decoration: none; border: 1px solid var(--green-border); padding: 4px 10px; border-radius: 3px;" target="_blank">github.com/manishklach/XL-Persistent-Kernel</a>
+      <a href="https://github.com/manishklach/gpu-resident-inference-lab" style="font-family: var(--mono); font-size: 12px; color: var(--green); text-decoration: none; border: 1px solid var(--green-border); padding: 4px 10px; border-radius: 3px;" target="_blank">github.com/manishklach/gpu-resident-inference-lab</a>
     </div>
   </header>
 
@@ -602,7 +602,7 @@
     <h2>What if the GPU never came home?</h2>
 
     <p>
-      The insight behind <a href="https://github.com/manishklach/XL-Persistent-Kernel" target="_blank">XL-Persistent-Kernel</a>
+      The insight behind <a href="https://github.com/manishklach/gpu-resident-inference-lab" target="_blank">GPU Resident Inference Lab</a>
       — and the production systems that inspired it, including Mirage/MPK (OSDI '25) and TileRT — is that the token loop
       belongs on the device, not the host.
     </p>
@@ -710,13 +710,13 @@ CPU polls completion</code></pre>
     <h2>Building the right scaffold first</h2>
 
     <p>
-      XL-Persistent-Kernel takes a principled approach: before writing real transformer math in CUDA, build the
+      GPU Resident Inference Lab takes a principled approach: before writing real transformer math in CUDA, build the
       <strong>control-flow skeleton</strong> precisely. Get the state machine right. Know exactly which buffers are
       authoritative, when draft tokens become committed tokens, and what must remain on-device in a real persistent kernel.
     </p>
 
     <div class="callout">
-      <strong>Many logical stages, one resident kernel.</strong> XL-Persistent-Kernel is not a bag of independent
+      <strong>Many logical stages, one resident kernel.</strong> GPU Resident Inference Lab is not a bag of independent
       CUDA kernels. The opposite is the point. The repo models prefill, decode, speculative verification, commit,
       and KV lifecycle management as logical stages inside one persistent GPU mega-kernel. The stage helper files
       exist for readability, but the execution model is one resident kernel that keeps request state and control
@@ -1025,7 +1025,7 @@ CPU polls completion</code></pre>
     <div class="pull-quote">
       <p>
         "LLM inference is not just a math problem anymore. At extreme scale, it becomes a scheduling, residency,
-        and orchestration problem. XL-Persistent-Kernel explores what happens when that orchestration moves from
+        and orchestration problem. GPU Resident Inference Lab explores what happens when that orchestration moves from
         the CPU into a persistent GPU-resident execution loop."
       </p>
     </div>
@@ -1067,9 +1067,9 @@ CPU polls completion</code></pre>
   </div>
 
   <div class="footer-cta">
-    <p><strong>XL-Persistent-Kernel</strong> is open source and actively developed.<br>
+    <p><strong>GPU Resident Inference Lab</strong> is open source and actively developed.<br>
     Star it, fork it, or open an issue — Phase 2B is in progress.</p>
-    <a href="https://github.com/manishklach/XL-Persistent-Kernel" class="cta-btn" target="_blank">
+    <a href="https://github.com/manishklach/gpu-resident-inference-lab" class="cta-btn" target="_blank">
       View on GitHub ↗
     </a>
   </div>

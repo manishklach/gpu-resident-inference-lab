@@ -1,228 +1,150 @@
 # Roadmap
 
-Development phases for the XL-Persistent-Kernel project.
+This roadmap organizes the project as a staged GPU-resident inference loop experiment rather than a single-kernel demo.
 
-## Phase 1: CPU Control-Flow Simulator
+## Phase 0: CPU Simulator and Trace Model
 
-**Status: Complete**
+Goal:
+Build a CPU-side model for decode control flow, trace collection, KV accounting, and scheduling behavior before real CUDA math is introduced.
 
-The foundation: a Python simulator that models the exact control flow a persistent CUDA kernel will need.
+Expected artifacts:
+- Python runtime and worker model
+- Request/trace/result state objects
+- KV planner with eviction and pinning
+- Trace and benchmark harness
 
-- Persistent runtime with specialized prefill and decode workers
-- Paged KV-cache planner with LRU eviction and pinning
-- Speculative block proposal and verification
-- MSA-inspired sparse KV page selection over logical blocks
-- Backend interface (`AbstractKernelBackend`) with CPU stub
-- Memory accounting (live bytes, pinned bytes, evicted bytes, fragmentation)
-- Speculative KV distinction (committed vs draft pages)
-- Benchmark harness with TTFT, ITL, acceptance rate, KV metrics
-- Full test coverage for runtime and KV cache behavior
+Validation metric:
+- Trace integrity and reproducible control-flow behavior in tests
 
-This phase ensures we get the state machine right before touching CUDA.
+## Phase 1: CUDA Persistent Loop Scaffold
 
-## Phase 2A: Mega-Kernel CUDA Control-Flow Scaffold
+Goal:
+Create a persistent GPU-resident loop scaffold that removes repeated host-driven orchestration from the critical path.
 
-**Status: In progress**
+Expected artifacts:
+- `xl_persistent_megakernel.cu`
+- Stage helpers for decode, verify, commit, scheduler, and KV state
+- Baseline host-launched comparison path
 
-The fused persistent mega-kernel as a device-side control-flow scaffold. No real transformer math yet.
+Validation metric:
+- Host launches per generated token/block
 
-- Request descriptor with lifecycle states and flags
-- Device-side stage helpers: prefill, decode, verify, commit, KV, scheduler
-- Device-side sparse KV block selection stage between scheduling and decode
-- Fake KV page metadata and lifecycle transitions
-- `xl_persistent_megakernel.cu` — the fused resident kernel
-- `baseline_host_decode_kernel.cu` — host-launched baseline for comparison
-- CUDA smoke test (`make cuda-smoke`) comparing baseline launches vs one mega-kernel launch
-- Stage helpers are `__forceinline__ __device__` functions, not separate kernels
+## Phase 2: NVTX / Profiler Visibility and Orchestration-Gap Measurement
 
-**Key principle:** Many logical inference stages, one persistent mega-kernel.
+Goal:
+Make orchestration gaps visible and measurable with timing and profiler annotations.
 
-## Phase 2A.1: Sparse KV Control-Flow Scaffold
+Expected artifacts:
+- CUDA timing harness
+- launch/sync counters
+- CSV sweep mode
+- profiler and NVTX integration
 
-**Status: In progress**
+Validation metric:
+- Host launches and host synchronizations removed per decode path
 
-Extend the persistent decode scaffold with deterministic sparse-KV selection.
+## Phase 3: Sparse KV Selection and Residency Metadata
 
-- `stage_sparse_kv_select.cuh` device helper for top-k KV block selection
-- Per-page score / selected / last_selected_step / sparse_rank metadata
-- Python `SparseKVSelector` mirroring the CUDA control path
-- Benchmark metrics for total vs selected KV blocks and estimated bytes saved
-- Tests that verify selected pages stay pinned during decode and released draft pages are not re-selected
+Goal:
+Model how a GPU-resident runtime touches less KV state and tracks which pages are hot, selected, pinned, or evictable.
 
-**Important:** This phase does not implement MiniMax MSA, FlashAttention, or production sparse attention. It models control flow and memory scheduling only.
+Expected artifacts:
+- Sparse KV selection helper
+- sparse KV gather kernel
+- residency flags and metadata
+- selected-vs-total KV metrics
 
-## Phase 2B: Measured Orchestration Overhead
+Validation metric:
+- Selected KV blocks vs total KV blocks
 
-**Status: In progress**
+## Phase 4: Speculative / Token-Block Decode Workflow
 
-Instrument the measurement harness to quantify the execution-control difference between host-launched decode and the persistent mega-kernel.
+Goal:
+Widen the resident loop so persistence has enough useful work to execute.
 
-- CUDA event timing (elapsed_ms for each path)
-- Host launch count (baseline: O(tokens), mega-kernel: 1)
-- Host synchronization count (baseline: O(tokens), mega-kernel: 1)
-- CSV export with RunMetrics columns: launch_reduction, sync_reduction, speedup_vs_baseline
-- `--mode sweep` Cartesian product over requests × tokens × draft_len
-- Repeatable `make cuda-bench` and `make cuda-bench-large` targets
-- `scripts/summarize_cuda_results.py` for compact summary + optional chart
-- `scripts/compare_metrics.py` for Python-CUDA side-by-side
-- `make compare` target for unified comparison
-- README and blog measurement sections
+Expected artifacts:
+- speculative draft/verify/commit control flow
+- block decode simulator and CUDA staging pieces
+- accepted/rejected token accounting
 
-**Key insight:** The first measurable win is not model quality or FLOPs. It is reduced orchestration overhead and less fragmented GPU execution.
+Validation metric:
+- Accepted tokens per verification step
 
-## Phase 2C: NVTX / Profiler Visibility
+## Phase 5: Real Fused Decode / Verify Kernels
 
-**Planned**
+Goal:
+Replace deterministic placeholder math with real decode, attention, projection, sampling, and verification kernels.
 
-Add NVTX annotations for profiler-based visualization of the control-flow difference.
+Expected artifacts:
+- real attention/projection/sampling kernels
+- fused decode/verify path
+- real model-backed staging mode
 
-- NVTX ranges around baseline loop (`baseline_host_decode_loop`)
-- NVTX range around mega-kernel launch (`persistent_megakernel`)
-- Guard with `#ifdef XLPK_ENABLE_NVTX` so builds without NVTX still work
-- Nsight Systems instructions in docs
-- Document expected trace shape: many small ranges (baseline) vs one large range (mega-kernel)
-- Profiler-backed latency analysis to complement CUDA event timing
+Validation metric:
+- Tokens per resident loop iteration with real math
 
-## Phase 2D: Block Speculative Decode Model
+## Phase 6: Tiered KV Movement and Async Prefetch / Spill
 
-**In progress**
+Goal:
+Model and later integrate tier-aware KV movement across HBM, DRAM, and SSD-like tiers.
 
-A Python model of DFlash-style block speculative decoding, showing how block-level generation creates the internal pipeline work that makes persistent kernels more valuable.
+Expected artifacts:
+- DMA-aware movement planner
+- tiered staging order
+- pressure / eviction kernel
+- tier residency rebalance kernel
 
-- `DFlashStyleDrafter` — proposes blocks of draft tokens using deterministic fake math
-- `TokenState` — explicit token lifecycle: draft, accept, commit, reject, resample
-- `SlidingWindowState` — SWA-inspired KV/state window with read/write counters
-- `BlockSpeculativeRuntime` — block-level runtime loop: draft → verify → commit → update
-- Benchmark modes: `autoregressive_serial`, `block_speculative`, `block_speculative_persistent_sim`, `block_speculative_host_orchestrated`
-- CSV columns: iterations, draft_blocks, accepted/rejected tokens, acceptance rate, state reads/writes, host launches, host syncs
-- `examples/block_speculative_demo.py` — runnable comparison
+Validation metric:
+- Estimated KV bytes read/saved and bytes promoted/demoted/reclaimed
 
-**Key insight:** Speculative decoding creates block-level work; the persistent mega-kernel keeps that work resident and flowing on GPU.
+## Phase 7: Multi-Request Scheduling and Fairness
 
-## Phase 2E: Warp-Specialized Persistent Pipeline Sketch
+Goal:
+Move from single-shot per-request passes to realistic multi-request GPU-resident scheduling, admission, and fairness decisions.
 
-**In progress**
+Expected artifacts:
+- resident scheduler kernel
+- trace replay admission kernel
+- queue-driven active-set and completion models
+- fairness and backpressure experiments
 
-A conceptual CUDA sketch showing how warp specialization maps onto the persistent mega-kernel for block speculative decode.
+Validation metric:
+- Queue depth, active-set watermark, and resident work completed per replay step
 
-- `cuda/examples/warp_specialized_block_pipeline_sketch.cu`
-- Warp group roles: load/prefetch, dequantize (FP4), compute block, verify/commit, schedule
-- Declared as conceptual only — not real TileRT, not real DFlash
-- Does not compile by default
+## Phase 8: Multi-GPU / NVLink or Fabric-Aware Residency
 
-## Phase 2F: Tiered KV Movement Planning
+Goal:
+Extend the residency and scheduling thesis beyond one device.
 
-**In progress**
+Expected artifacts:
+- multi-GPU residency model
+- NVLink/fabric-aware placement ideas
+- remote KV movement experiments
 
-Model how sparse-selected KV pages would be sourced into the resident decode path from different memory tiers.
+Validation metric:
+- TTFT and inter-token latency in future multi-device real-model mode
 
-- `cuda/src/dma_aware_kv_movement_planner_kernel.cu`
-- Deterministic HBM / DRAM / SSD source-tier classification for selected pages
-- Metadata-only DMA op planning for page movement into the compact decode working set
-- Host launcher mode: `--mode dma-movement`
-- Explicitly a research planner, not real async copy or production paging logic
+## Current Artifacts
 
-## Phase 2G: Tiered KV Staging Order
+Today’s repo already includes:
 
-**In progress**
+- CPU simulator and trace model
+- CUDA persistent loop scaffold
+- sparse KV selection
+- speculative/block decode scaffolding
+- DMA-aware movement planning
+- tiered staging
+- KV pressure and eviction
+- KV tier residency rebalance
+- trace replay admission
 
-Add a staging pass that consumes selected pages and tier classifications, then emits an ordered resident working set for decode.
+## Evaluation Questions
 
-- `cuda/src/tiered_kv_staging_kernel.cu`
-- Prioritize HBM-resident pages before DRAM and SSD-backed pages
-- Emit staging-order and double-buffer-slot metadata
-- Host launcher modes: `--mode resident-scheduler`, `--mode kv-prefetch`, `--mode tiered-kv-staging`
-- Still metadata-only; no real async transport, overlap, or queue-driven residency engine
+Good ways to judge progress:
 
-## Phase 2H: KV Pressure and Eviction
-
-**In progress**
-
-Model resident KV pressure handling once sparse selection and tier-aware staging have already consumed capacity.
-
-- `cuda/src/kv_pressure_eviction_kernel.cu`
-- Draft-first eviction policy with pinned-page and selected-page protection
-- Reclaimed-byte accounting and per-request eviction metrics
-- Host launcher mode: `--mode kv-pressure`
-- Still metadata-only; not a real allocator, LRU heap, or global cache manager
-
-## Phase 2I: Hierarchical KV Tier Residency
-
-**In progress**
-
-Model the residency policy that sits between staging and eviction: which pages should be promoted upward and which cold pages should be demoted when fast-tier budgets are tight.
-
-- `cuda/src/kv_tier_residency_kernel.cu`
-- One-step promotions for sparse-selected pages and budget-driven demotions for non-selected pages
-- Per-request HBM / DRAM / SSD final residency accounting
-- Host launcher mode: `--mode tier-residency`
-- Still metadata-only; not a globally coordinated residency manager or real migration engine
-
-## Phase 2J: Trace Replay and Admission
-
-**In progress**
-
-Add a device-side replay pass that introduces time, arrival order, bounded admission, and completion ordering into the research suite.
-
-- `cuda/src/trace_replay_admission_kernel.cu`
-- Deterministic arrival/service trace replay through `queue_desc.h`
-- Pending-queue depth, active-set watermark, admission count, and completion count metrics
-- Host launcher mode: `--mode trace-replay`
-- Still single-threaded and metadata-only; not real continuous batching or concurrent queue execution
-
-## Phase 3: Real Fused Decode/Verify Kernels
-
-**Planned**
-
-Replace the stub with actual transformer operations.
-
-- Fused attention kernel for decode
-- Projection + sampling kernel
-- KV page loading from paged cache
-- Speculative token proposal (small draft model)
-- Fused verification kernel
-- Page table updates on device
-- Memory-efficient attention (FlashAttention-style)
-- Continuous batching with dynamic request admission
-
-Key challenge: keeping the persistent loop efficient while adding real math.
-
-## Phase 4: Multi-Request Scheduling and Admission
-
-**Planned**
-
-Scale from single-request decode to multi-request continuous batching.
-
-- Dynamic request admission (add new requests mid-batch)
-- Request preemption and resumption
-- Priority-based scheduling
-- KV cache pressure management
-- Memory-aware batch sizing
-- Speculative verification across requests
-
-This phase enables realistic throughput measurements.
-
-## Phase 5: Multi-GPU / NVLink / Communication Overlap
-
-**Planned**
-
-Distribute the persistent kernel across multiple GPUs.
-
-- Tensor parallelism across NVLink-connected GPUs
-- Pipeline parallelism for deep models
-- Communication overlap with compute
-- KV cache distribution and synchronization
-- Load balancing across devices
-- Fault tolerance and checkpointing
-
-This phase targets production-scale LLM serving.
-
-## Success Criteria
-
-The project succeeds when:
-
-1. The CPU simulator accurately models the control flow of the CUDA implementation
-2. The CUDA mega-kernel runs on real hardware without host-device synchronization during decode
-3. Fused kernels demonstrate measurable launch-overhead reduction vs per-token launch
-4. Multi-GPU scaling demonstrates near-linear speedup on NVLink-connected nodes
-5. The benchmark harness measures realistic metrics (TTFT, ITL, throughput)
+- How many host launches are removed per token/block?
+- How many selected KV blocks are touched relative to total KV blocks?
+- How many accepted tokens are produced per verify step?
+- How much useful work happens inside one resident loop?
+- Where do orchestration gaps still remain?
+- Which parts are still placeholder math and which are real kernels?

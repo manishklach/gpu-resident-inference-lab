@@ -1,4 +1,4 @@
-# CUDA Staging: Fused Persistent Mega-Kernel
+# CUDA Staging: Persistent GPU-Resident Loop
 
 This document describes the CUDA staging layer for the persistent decode runtime. The entire pipeline is fused into **one** persistent GPU kernel — the `xl_persistent_megakernel`. All pipeline stages are device-side inline helpers, not separately launched kernels.
 
@@ -62,7 +62,7 @@ host: poll completion queue
 
 The kernel stays resident on the GPU. There is one launch, one synchronization point (at completion), and zero host–GPU communication during the decode loop.
 
-This is the core thesis of XL-Persistent-Kernel.
+This is the core thesis of GPU Resident Inference Lab.
 
 ---
 
@@ -340,7 +340,7 @@ make cuda-research-bench
 Output format:
 
 ```
-XL-Persistent-Kernel CUDA smoke test
+GPU Resident Inference Lab CUDA smoke test
 
 Baseline host-launched decode:
   launches: N

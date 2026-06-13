@@ -1,142 +1,191 @@
-# XL-Persistent-Kernel
+# GPU Resident Inference Lab
 
-Persistent GPU-Resident Inference Research Platform for Sparse KV, Tiered Residency, and Speculative Decode
+Research lab for GPU-resident LLM inference loops: persistent kernels, sparse KV selection, tiered residency, speculative decode, and trace-driven scheduling.
 
-[![CI](https://github.com/manishklach/XL-Persistent-Kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/manishklach/XL-Persistent-Kernel/actions/workflows/ci.yml)
+[![CI](https://github.com/manishklach/gpu-resident-inference-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/manishklach/gpu-resident-inference-lab/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: Research](https://img.shields.io/badge/license-Research%20Use-yellow)](LICENSE)
-[![Blog](https://img.shields.io/badge/GitHub%20Pages-blog-green)](https://manishklach.github.io/XL-Persistent-Kernel/)
+[![Blog](https://img.shields.io/badge/GitHub%20Pages-blog-green)](https://manishklach.github.io/gpu-resident-inference-lab/)
 
-XL-Persistent-Kernel is a research platform for future inference loops where control flow, KV movement, and request scheduling stay GPU-resident as much as possible.
+A research scaffold for future LLM inference loops where decode control flow,
+KV movement, speculative verification, and request scheduling stay resident
+on the GPU as much as possible.
 
-It explores the convergence of persistent execution, sparse KV block selection, speculative/token-parallel decode workflows, hierarchical KV tier residency, memory-pressure handling, and trace-driven device-side admission.
+The project explores five interacting ideas:
 
-> This is a research and educational platform. It models inference control flow and memory scheduling. It is not a production LLM runtime.
+1. Persistent GPU-resident execution to reduce host launch/sync overhead
+2. Sparse KV block selection to reduce memory touched per decode step
+3. Speculative/token-parallel decode to create more useful work per loop
+4. Tiered KV residency across HBM, DRAM, and SSD-like tiers
+5. Trace-driven admission and scheduling for multi-request serving
 
-Future inference performance may depend as much on moving fewer KV blocks and keeping execution resident as on making matrix multiplication faster.
+This is not a production LLM runtime. It is a control-flow, memory-scheduling,
+and CUDA-staging research platform.
 
-The project is intentionally precise about scope. It models the control-flow and memory-scheduling shape of future inference systems. It does not claim compatibility with MiniMax MSA, FlashAttention, vLLM, SGLang, TensorRT-LLM, Mirage MPK, or any production serving stack.
+The core thesis is that once inference becomes quantized, sparse, and latency-sensitive, the bottleneck shifts from raw compute to orchestration and data movement. The next runtime layer should keep more of the decode/refine/verify/KV-update loop resident on GPU, while using sparse KV selection and token/block parallelism to ensure the persistent loop has enough useful work to execute.
 
-## Why This Exists
+## Why This Repo Exists
 
-Modern inference systems run into three different bottlenecks at once.
-
-### A. Autoregressive Decode Dependency
-
-Traditional decoding is sequential:
-
-```text
-token N -> token N+1 -> token N+2
-```
-
-That dependency chain is fundamental. A persistent kernel does not remove it by itself. Higher tokens/sec usually needs additional useful work inside the loop, such as batching, speculative decoding, token-parallel verification, or other multi-token structure.
-
-### B. KV Cache Bandwidth
-
-As context grows to 128K, 1M, and beyond, KV cache movement becomes a dominant memory-system problem. Even when matrix math is efficient, reading and updating ever-larger KV state can become the thing that limits throughput. Sparse-attention-inspired KV block selection is one way to explore how future runtimes might touch less memory per decode step.
-
-### C. CPU-GPU Orchestration
-
-Many inference systems involve repeated CPU scheduling, synchronization, and kernel launches. Persistent execution explores what happens when more of the loop remains resident on GPU and less progress depends on host round-trips.
-
-## Core Idea
-
-XL-Persistent-Kernel combines three complementary ideas:
-
-1. Sparse KV selection reduces how much memory is touched.
-2. Speculative/token-parallel execution increases useful work per iteration.
-3. Persistent GPU-resident execution reduces host orchestration overhead.
-
-These are complementary, not substitutes. Sparse KV selection does not replace speculation. Persistent execution does not replace useful token-level work. Speculative workflows do not automatically solve memory movement. The repo exists to model how these levers interact.
-
-## Architecture
+Traditional autoregressive decode is a skinny loop:
 
 ```text
-Request
-  |
-  v
-Scheduler
-  |
-  v
-Sparse KV Block Selector
-  |
-  v
-Persistent GPU-Resident Loop
-  |-- Decode
-  |-- Verify
-  |-- Commit
-  |-- KV Update
-  |
-  v
-Response Stream
+CPU launch -> GPU decode -> CPU sync -> CPU launch -> GPU verify -> CPU sync
 ```
+
+That shape creates orchestration gaps. Even if individual kernels are efficient, the overall serving loop can underutilize the GPU when each step is too narrow and too host-driven.
+
+This repo studies a wider GPU-resident loop instead:
 
 ```text
-while (!done) {
-    select_sparse_kv_blocks();
-    decode_candidates();
-    verify_candidates();
-    commit_accepted_tokens();
-    update_kv_lifecycle();
-}
+submit once
+   |
+   v
+GPU resident loop:
+  sparse KV select
+  -> draft / token-block decode
+  -> expert route
+  -> attention / verify
+  -> commit accepted tokens
+  -> KV update
+  -> schedule next block
 ```
 
-At a high level, the repo models a request moving through scheduling, sparse KV page selection, decode, verification, commit, and KV lifecycle updates, all shaped around a GPU-resident loop rather than a host-driven per-step orchestration path.
+The point is not to overclaim throughput. The point is to make orchestration, residency, and memory-movement bottlenecks visible and to prototype how a future GPU-resident runtime might be structured.
+
+## Decode Loop Shapes
+
+Diagram 1: CPU-driven decode today
+
+```text
+CPU
+ | launch decode
+ v
+GPU: decode one token/block
+ |
+CPU sync / schedule / launch again
+ |
+ v
+GPU: verify / update
+ |
+repeat
+```
+
+Diagram 2: GPU-resident loop thesis
+
+```text
+CPU submits work once
+ |
+ v
+GPU persistent loop:
+  [select KV blocks]
+  [draft token block]
+  [route experts]
+  [attention/verify]
+  [commit accepted tokens]
+  [update KV/state]
+  [prefetch next block]
+ |
+ v
+CPU receives coarse-grained completions
+```
+
+## Persistent Kernels Are Not Enough
+
+Persistent kernel alone:
+- reduces launch/sync overhead
+
+Persistent kernel + token/block parallelism:
+- creates enough useful resident work
+
+Persistent kernel + sparse KV:
+- reduces memory touched per iteration
+
+Persistent kernel + tiered residency:
+- controls where KV lives under pressure
+
+Persistent kernel + trace-driven admission:
+- decides which requests/blocks deserve GPU residency
+
+A persistent kernel only removes orchestration gaps. It does not magically make autoregressive decoding parallel. The decode loop becomes interesting when persistence is combined with token/block parallelism, sparse KV selection, and resident scheduling.
+
+## Modern Inference Stack
+
+This repo studies the runtime/kernel side of a broader inference stack:
+
+- FP4 / NVFP4-style quantization: reduce weight bandwidth
+- MoE sparsity: reduce active parameters per token
+- SWA / local attention / sparse KV: bound KV and context movement
+- MTP / speculative / block decoding: make decode wider than one token at a time
+- Persistent GPU-resident mega-kernels: keep the hot loop on device
+- Tiered KV residency: decide what stays in HBM, what spills, and what is prefetched
+
+The repo is mostly focused on the last three layers: token/block parallel decode, GPU-resident execution, and KV residency/scheduling.
+
+## What Runs Today vs Future Work
+
+| Area | Today | Future |
+|---|---|---|
+| Persistent loop | CUDA scaffold / control-flow prototype | real fused decode loop |
+| Transformer math | deterministic placeholder math | attention/projection/sampling kernels |
+| Sparse KV | metadata/top-k scaffold | real sparse KV gather |
+| Tiered residency | planning model / simulator | async HBM/DRAM/SSD movement integration |
+| Speculative decode | block workflow scaffold | real draft/verify model path |
+| Metrics | launch/sync/memory estimates | real TTFT/ITL/tok/s under load |
+| Scheduling | trace-driven admission ideas | multi-request GPU-resident scheduler |
 
 ## Research Themes
 
-### Persistent Execution
+### Persistent GPU-Resident Execution
 
-Instead of launching many short-lived kernels from the CPU, the project explores keeping the decode/verify/commit/update loop resident.
+Instead of launching many short-lived kernels from the CPU, the project explores keeping the decode/verify/KV-update loop resident on the device.
 
-Persistent execution reduces launch overhead and enables tighter scheduling, but it does not by itself parallelize autoregressive token generation.
+### Sparse KV Selection
 
-### Sparse KV Block Selection
+Instead of touching all KV blocks, a runtime can select a smaller relevant subset. In this repo, that path is deterministic and lightweight by design. It is not MiniMax MSA or production sparse attention.
 
-Instead of touching all KV blocks, a runtime can select a smaller relevant subset. This models sparse-attention-inspired memory behavior.
+### Speculative / Token-Parallel Decode
 
-In this repo, the sparse selector is deliberately lightweight and deterministic. It is best described as MSA-inspired or sparse-attention-inspired control flow. It does not implement MiniMax MSA.
+Speculative and block-style decode creates more useful work per resident iteration. This is what makes a persistent loop more valuable than a one-token-at-a-time device loop.
 
-### Speculative / Token-Parallel Workflows
+### Tiered KV Residency
 
-Speculative/token-parallel workflows create more useful work per decode iteration. This is the layer that can improve effective tokens/sec when combined with verification and commit logic.
+The repo models conceptual HBM, DRAM, and SSD-like tiers, plus promotion, demotion, staging, and pressure handling. These are residency and scheduling scaffolds, not real migration engines.
 
-The repo includes speculative draft/verify/commit scaffolding, block-style workflows, and adaptive block sizing experiments to show how multi-token work can make a resident loop more valuable.
+### Trace-Driven Scheduling
 
-### KV Lifecycle Management
+The repo also models arrival, admission, active-set limits, and completion ordering so multi-request serving behavior can be studied as a control-flow problem, not just a single-request kernel problem.
 
-KV blocks move through lifecycle states:
+## What This Repo Is
 
-```text
-allocated -> active -> selected -> verified -> released
-```
+- A research scaffold for GPU-resident inference control flow
+- A way to study persistent execution, sparse KV selection, and token/block parallel decode
+- A place to prototype scheduling ideas before integrating with real serving stacks
 
-This matters because future inference systems are not only compute pipelines. They are also memory-state machines that need to decide what remains resident, what is pinned, what is sparse-selected, and what is safe to discard.
+## Non-goals
 
-## What This Repo Is / Is Not
+This repo is not:
+- a production inference server
+- a replacement for vLLM, SGLang, TensorRT-LLM, or FlashAttention
+- a complete transformer implementation today
+- a benchmark claiming state-of-the-art throughput
+- a hardware proposal requiring a new SRAM chip
 
-| This repo is | This repo is not |
-|---|---|
-| A research scaffold for persistent inference control flow | A production LLM serving engine |
-| A sparse KV selection demo | A full MiniMax MSA implementation |
-| A speculative decode workflow simulator | A model-quality benchmark |
-| A memory-scheduling playground | A replacement for FlashAttention/vLLM/SGLang |
-| A way to reason about future inference kernels | A drop-in CUDA attention library |
+This repo is:
+- a research scaffold for GPU-resident inference control flow
+- a way to study persistent execution, sparse KV selection, and token/block parallel decode
+- a place to prototype scheduling ideas before integrating with real serving stacks
 
-## Why Persistent Kernels Need Useful Work
+## How to Evaluate This Repo
 
-A persistent kernel is most valuable when the resident loop has enough work to amortize residency:
+This repo should be evaluated on whether it makes the control-flow bottlenecks visible, not on whether it currently serves a real frontier model.
 
-- speculative candidate generation
-- multi-token verification
-- sparse KV selection
-- KV prefetch
-- multi-request scheduling
-- decode/commit/update overlap
-
-If decode remains strictly one-token-at-a-time with no batching, speculation, or internal pipeline, persistent kernels mostly reduce orchestration overhead; they do not remove the fundamental autoregressive dependency.
-
-That is the central systems point behind this repo. Persistent execution matters most when paired with useful work inside the resident loop.
+Good questions:
+- How many CPU launches are removed per token/block?
+- How much KV traffic is avoided by sparse selection?
+- How many accepted tokens are produced per verify step?
+- How much useful work happens inside one resident loop?
+- Where do orchestration gaps still appear?
+- Which parts would need to become real CUDA kernels next?
 
 ## Implemented Today
 
@@ -155,7 +204,7 @@ That is the central systems point behind this repo. Persistent execution matters
 
 ## Metrics
 
-The repo currently emits some metrics directly and models others as planned or expected fields for future benchmark surfaces.
+The repo currently emits some metrics directly and models others as future benchmark surfaces.
 
 | Metric | Status | Meaning |
 |---|---|---|
@@ -165,46 +214,38 @@ The repo currently emits some metrics directly and models others as planned or e
 | `kv_sparsity_ratio` | Implemented | Fraction of blocks not touched by sparse selection |
 | `estimated_kv_bytes_read` | Implemented | Approximate KV bytes read under selected-block access |
 | `estimated_kv_bytes_saved` | Implemented | Approximate KV bytes not read because of sparsity |
-| `accepted_tokens` | Partially implemented | Accepted speculative tokens are tracked in runtime traces/results |
+| `accepted_tokens` | Partially implemented | Accepted speculative tokens tracked in runtime traces/results |
 | `rejected_tokens` | Implemented in block workflow benchmarks | Rejected speculative tail tokens |
-| `speculative_candidates` | Planned naming alignment | Candidate draft tokens proposed before verification |
-| `commit_rate` | Planned | Accepted-to-proposed or accepted-to-iterated ratio depending on benchmark surface |
-| `loop_iterations` | Planned naming alignment | Resident-loop iterations per request or batch |
-| `orchestration_events_avoided` | Planned | Host launch/sync reductions relative to host-driven decode |
-
-The emphasis today is on control-flow structure and estimated memory movement, not on model quality or production throughput claims.
-
-## Benchmark Modes
-
-| Mode | Description |
-|---|---|
-| `serial_decode` | Block size 1, no speculation; CPU simulates a host-launched decode path |
-| `speculative_decode` | Configurable draft/verify/commit workflow |
-| `forced_rejection` | Periodic draft rejection stress |
-| `kv_pressure` | Undersized KV cache to trigger eviction pressure |
-| `mega_kernel_sim` | CPU model of the fused resident-loop control path |
-| `sparse_kv_megakernel` | Resident-loop model with deterministic sparse KV block selection |
-| `autoregressive_serial` | One token committed per iteration in the block workflow model |
-| `block_speculative` | DFlash-style block drafting and verification scaffold |
-| `block_speculative_persistent_sim` | Block speculation plus persistent control model |
-| `block_speculative_host_orchestrated` | Block speculation plus repeated host launch/sync model |
-
-All Python benchmarks are control-flow simulations. The CUDA path is a staging scaffold and orchestration comparison harness, not a production inference benchmark.
+| `trace queue metrics` | Implemented | Admission, completion, queue depth, and active-set watermarks |
+| `TTFT / ITL / tok/s` | Future real-model mode | Real serving metrics once placeholder math is replaced |
 
 ## CUDA Staging Layer
 
-The `cuda/` directory contains the resident-loop scaffold and the host-launched baseline:
+The `cuda/` directory contains the resident-loop scaffold and the host-launched baseline.
 
 - `src/xl_persistent_megakernel.cu` models a fused GPU-resident loop
 - `src/baseline_host_decode_kernel.cu` models repeated host-launched decode steps
 - `include/stage_sparse_kv_select.cuh` models sparse KV block selection in the loop
 - `src/sparse_kv_gather_kernel.cu` models page scoring, top-k selection, and compacted sparse KV gather
 - `src/verify_commit_kernel.cu` models fused speculative verify plus accepted-prefix commit and rejected-page release
-- `include/stage_decode.cuh`, `include/stage_spec_verify.cuh`, `include/stage_commit.cuh`, and `include/stage_kv.cuh` model the rest of the logical inference path
+- `src/tiered_kv_staging_kernel.cu`, `src/kv_pressure_eviction_kernel.cu`, `src/kv_tier_residency_kernel.cu`, and `src/trace_replay_admission_kernel.cu` model staging, pressure, tier rebalance, and trace-driven admission
 
-These are stage helpers for one resident control-flow prototype. They are not a collection of production CUDA kernels.
+These are research kernels and stage helpers for a persistent GPU-resident loop. They are not a production CUDA serving stack.
 
-The host launcher also exposes standalone research-kernel benchmark modes for:
+## Benchmark Modes
+
+The Python side provides control-flow simulations such as:
+
+- `serial_decode`
+- `speculative_decode`
+- `forced_rejection`
+- `kv_pressure`
+- `mega_kernel_sim`
+- `sparse_kv_megakernel`
+- `block_speculative`
+- `block_speculative_persistent_sim`
+
+The CUDA host launcher exposes standalone research-kernel modes for:
 
 - resident scheduler ordering
 - sparse KV gather and score
@@ -217,27 +258,6 @@ The host launcher also exposes standalone research-kernel benchmark modes for:
 - trace replay admission
 - resident sparse decode pipeline
 
-The DMA-aware planner is still deliberately narrow in scope: it models how sparse-selected pages would be classified as HBM hits or DRAM/SSD fetches before decode consumes the compact working set. It does not implement real async copy, TMA, tier allocators, or production paging logic.
-
-The tiered staging kernel builds one step on top of that: it reorders selected pages so HBM-resident blocks are staged first, followed by DRAM and SSD-backed fetches, and assigns a simple double-buffer slot pattern for the resident path. This is still metadata-only scheduling, not real overlap or transport execution.
-
-The KV pressure kernel models the next control problem after staging: reclaiming memory when the resident working set gets too large. It applies a deterministic draft-first eviction policy, skips pinned and currently selected pages, and emits reclaimed-byte accounting. This is still not a real allocator or full cache manager.
-
-The KV tier residency kernel sits between staging and eviction: it promotes sparse-selected pages upward through the tier hierarchy and demotes colder non-selected pages when per-request HBM and DRAM budgets are exceeded. This models residency policy and tier pressure, not real migration overlap or globally coordinated cache management.
-
-The trace replay kernel adds time and admission dynamics on top of those one-shot passes. It replays deterministic arrivals and service quanta through a device-side pending queue, bounded active set, and completion ordering surface. This is still a single-threaded research queue model, not full continuous batching.
-
-## Measurement: Host-Launched Decode vs Persistent Loop
-
-The CUDA measurement harness focuses on orchestration structure:
-
-- host kernel launches
-- host synchronizations
-- elapsed control-path time
-- relative reduction between host-driven and resident-loop execution
-
-This is intentionally narrower than claiming model throughput. The current scaffold uses deterministic fake math. What it can show credibly today is the difference between repeatedly launching work from the CPU and keeping the loop resident on GPU.
-
 ## Repository Structure
 
 ```text
@@ -249,7 +269,7 @@ src/megakernel_lab/
     sparse_kv.py          - Sparse KV top-k selection scaffold
     spec_decode.py        - Draft/verify control-flow logic
     block_runtime.py      - Block speculative runtime model
-    block_spec_decode.py  - DFlash-style drafting scaffold
+    block_spec_decode.py  - Block drafting scaffold
     bench.py              - Benchmark harness and metrics
     demo.py               - Runnable runtime demo
 
@@ -262,13 +282,7 @@ docs/
     ARCHITECTURE.md       - Core concepts and design intent
     CUDA_STAGING.md       - CUDA staging notes
     ROADMAP.md            - Development roadmap
-
-tests/
-    test_runtime.py
-    test_sparse_kv.py
-    test_spec_kv.py
-    test_bench.py
-    ...
+    BLOG.md               - Draft long-form framing
 ```
 
 ## Quick Start
@@ -295,82 +309,30 @@ make cuda-bench-large
 make cuda-research-bench
 ```
 
-## Roadmap
-
-Current:
-
-- [x] Persistent execution scaffold
-- [x] Sparse KV block selection
-- [x] Speculative/token-parallel workflow
-- [x] KV lifecycle tracking
-
-Next:
-
-- [x] Multi-request scheduling
-- [x] KV prefetch planning
-- [x] Hierarchical KV tiers
-- [x] HBM / DRAM / SSD simulation
-- [x] DMA-aware KV movement model
-- [x] Memory pressure simulation
-- [x] Trace-driven replay
-- [ ] Visualization of KV block selection
-- [ ] Benchmark report generation
-
-More detailed phase notes live in [docs/ROADMAP.md](docs/ROADMAP.md).
-
-## Related Ideas
-
-This repo is conceptually adjacent to several important inference-system ideas:
-
-- sparse attention
-- MSA-style KV block sparsity
-- persistent kernels
-- speculative decoding
-- memory-centric inference
-- GPU-resident scheduling
-- mega-kernel inference systems
-
-The project references these ideas as systems inspiration only. It does not claim implementation compatibility with any specific production stack or published kernel library.
-
 ## Suggested GitHub Description
 
-Option A:
-Persistent GPU-resident inference research platform combining sparse KV selection, speculative decode, and KV lifecycle scheduling.
-
-Option B:
-Research scaffold for future LLM inference loops: persistent kernels, sparse KV blocks, token-parallel decode, and memory-centric scheduling.
-
-Option C:
-Experimental persistent inference kernel lab for reducing KV traffic, CPU orchestration, and decode-loop overhead.
+Research lab for GPU-resident LLM inference loops: persistent kernels, sparse KV selection, tiered residency, speculative decode, and trace-driven scheduling.
 
 ## Suggested GitHub Topics
 
-- `persistent-kernel`
-- `cuda`
-- `gpu-kernels`
+- `gpu-inference`
 - `llm-inference`
+- `persistent-kernels`
+- `cuda`
 - `kv-cache`
-- `sparse-attention`
 - `speculative-decoding`
+- `multi-token-prediction`
+- `sparse-kv`
+- `gpu-runtime`
 - `inference-systems`
-- `memory-scheduling`
-- `ai-infrastructure`
 
 ## Further Reading
 
-- [Project blog](https://manishklach.github.io/XL-Persistent-Kernel/)
-- [Adaptive Speculative Block Sizing (ASBS) for XL-Persistent-Kernel](https://manishklach.github.io/writings/adaptive-speculative-block-sizing-xl-persistent-kernel.html)
+- [Project blog](https://manishklach.github.io/gpu-resident-inference-lab/)
+- [Adaptive Speculative Block Sizing (ASBS) blog, historical naming](https://manishklach.github.io/writings/adaptive-speculative-block-sizing-xl-persistent-kernel.html)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/ROADMAP.md](docs/ROADMAP.md)
-
-## Development
-
-```bash
-make install
-make lint
-make format
-make test
-```
+- [docs/BLOG.md](docs/BLOG.md)
 
 ## License
 

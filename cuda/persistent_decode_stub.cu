@@ -12,7 +12,7 @@
 #include <cstdio>
 
 int main() {
-    printf("XL-Persistent-Kernel: persistent_decode_stub.cu\n");
+    printf("GPU Resident Inference Lab: persistent_decode_stub.cu\n");
     printf("This file is kept for backward compatibility.\n");
     printf("Use 'make cuda-smoke' to build the full test suite.\n\n");
 

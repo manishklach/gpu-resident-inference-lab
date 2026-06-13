@@ -7,7 +7,7 @@
  *   on the host, repeat. One host kernel launch = one decode step.
  *
  * This exists ONLY for comparison against the persistent mega-kernel.
- * The whole point of XL-Persistent-Kernel is to eliminate this pattern.
+ * The whole point of this GPU resident inference loop experiment is to eliminate this pattern.
  *
  * Key design:
  *   - Host launches repeatedly (host_kernel_launches = O(tokens)).

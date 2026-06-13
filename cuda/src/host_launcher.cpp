@@ -1936,7 +1936,7 @@ int main(int argc, char** argv) {
     }
 
     printf("========================================\n");
-    printf("XL-Persistent-Kernel CUDA Measurement\n");
+    printf("GPU Resident Inference Lab CUDA Measurement\n");
     printf("========================================\n\n");
     printf("Configuration:\n");
     printf("  requests: %d\n", requests);

@@ -1,4 +1,4 @@
-"""XL-Persistent-Kernel package."""
+"""GPU Resident Inference Lab package."""
 
 from .backend import AbstractKernelBackend, CPUStubBackend
 from .config import RuntimeConfig
