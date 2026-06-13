@@ -22,6 +22,12 @@ The project explores five interacting ideas:
 This is not a production LLM runtime. It is a control-flow, memory-scheduling,
 and CUDA-staging research platform.
 
+Quick stub demo:
+
+```bash
+python tools/reasoning_metrics_stub.py
+```
+
 The core thesis is that once inference becomes quantized, sparse, and latency-sensitive, the bottleneck shifts from raw compute to orchestration and data movement. The next runtime layer should keep more of the decode/refine/verify/KV-update loop resident on GPU, while using sparse KV selection and token/block parallelism to ensure the persistent loop has enough useful work to execute.
 
 ## Why This Repo Exists
@@ -347,7 +353,7 @@ The near-term focus of this repo is GPU-resident inference control flow:
 persistent loops, sparse KV selection, token/block parallel decode, tiered
 residency, and trace-driven scheduling.
 
-The longer-term direction is broader:
+The longer-term direction is broader, but still future-facing:
 
 > not just faster tokens/sec, but faster verified decisions/sec.
 
