@@ -1,5 +1,7 @@
 # Unified Pipeline
 
+![Unified Pipeline Architecture](./unified_pipeline_architecture.svg)
+
 ```text
 task
   |
