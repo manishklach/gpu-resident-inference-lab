@@ -129,20 +129,34 @@ Validation metric:
 Goal:
 Extend the resident decode loop from token generation toward branch-level reasoning workflows.
 
+Status:
+Future research direction. Not implemented today.
+
 Ideas:
 - speculative reasoning branches instead of only speculative tokens
 - verifier/commit logic for candidate reasoning paths
 - adaptive precision per token, layer, or reasoning segment
-- retrieval/tool-call scheduling inside the resident loop
+- retrieval/tool-call scheduling around the resident loop
 - decision-quality metrics in addition to token throughput
+
+Expected artifacts:
+- reasoning-branch trace format
+- verifier/commit simulator
+- branch acceptance/rejection metrics
+- decision-quality metrics stub
+- experiments comparing token throughput vs verified decision throughput
 
 Validation metrics:
 - accepted tokens per verify step
 - accepted reasoning branches per verification cycle
 - verifier rejection rate
 - decisions per second
-- correct decisions per second
+- verified decisions per second
 - latency per verified answer
+
+Non-goal:
+Do not claim real reasoning correctness until a real verifier, retrieval/tool loop,
+and correctness benchmark exist.
 
 ## Current Artifacts
 

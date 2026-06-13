@@ -283,6 +283,11 @@ docs/
     CUDA_STAGING.md       - CUDA staging notes
     ROADMAP.md            - Development roadmap
     BLOG.md               - Draft long-form framing
+    REASONING_PIPELINE.md - Decode-to-reasoning north-star framing
+    REASONING_METRICS_STUB.md - Metric vocabulary for future branch verification
+
+tools/
+    reasoning_metrics_stub.py - A toy simulator for future verified-decisions/sec metrics. It does not run a model and should not be interpreted as a real reasoning benchmark.
 ```
 
 ## Quick Start
@@ -333,12 +338,18 @@ Research lab for GPU-resident LLM inference loops: persistent kernels, sparse KV
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/ROADMAP.md](docs/ROADMAP.md)
 - [docs/BLOG.md](docs/BLOG.md)
+- [From GPU-Resident Decode to GPU-Resident Reasoning](docs/REASONING_PIPELINE.md)
+- [Reasoning Metrics Stub](docs/REASONING_METRICS_STUB.md)
 
-## Where This Is Going
+## Where This Is Going: From Tokens/sec to Verified Decisions/sec
 
-The long-term direction is not just faster tokens per second.
+The near-term focus of this repo is GPU-resident inference control flow:
+persistent loops, sparse KV selection, token/block parallel decode, tiered
+residency, and trace-driven scheduling.
 
-The deeper target is **verified decisions per second**.
+The longer-term direction is broader:
+
+> not just faster tokens/sec, but faster verified decisions/sec.
 
 Future inference systems will likely combine:
 
@@ -351,6 +362,28 @@ Future inference systems will likely combine:
 In this framing, the winning system is not only the fastest token generator.
 
 It is the fastest correct reasoner.
+
+This repo does not implement that full system today. It starts with the lower-level
+runtime pieces needed to study that direction: resident execution, sparse memory
+selection, block-level decode structure, and scheduling visibility.
+
+### Scope guardrail
+
+Today, this repo is not a reasoning engine.
+
+It does not yet implement:
+- real multi-agent orchestration
+- real verifier models
+- real tool-use loops
+- real retrieval-integrated generation
+- real symbolic checking
+- real correctness scoring
+
+Those are future research directions.
+
+The current repo focuses on the systems substrate:
+GPU-resident control flow, memory selection, token/block decode structure,
+and orchestration-gap measurement.
 
 ## License
 
