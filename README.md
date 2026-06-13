@@ -347,6 +347,7 @@ Research lab for GPU-resident LLM inference loops: persistent kernels, sparse KV
 - [From GPU-Resident Decode to GPU-Resident Reasoning](docs/REASONING_PIPELINE.md)
 - [Reasoning Metrics Stub](docs/REASONING_METRICS_STUB.md)
 - [Speculative Reasoning and Multi-Agent Orchestration](docs/SPECULATIVE_REASONING_SYSTEM.md)
+- [Decisions per Second Research Agenda](docs/DECISIONS_PER_SECOND_AGENDA.md)
 
 ## Where This Is Going: From Tokens/sec to Verified Decisions/sec
 
